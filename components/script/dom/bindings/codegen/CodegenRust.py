@@ -5486,8 +5486,19 @@ class CGDOMJSProxyHandler_getOwnPropertyDescriptor(CGAbstractExternMethod):
             get += dedent(
                 """
                 if !proxyhandler::is_platform_object_same_origin(cx, proxy) {
+                    let this = UnwrapProxy(proxy);
+                    let holder_map = CrossOriginPropertiesHolderMapAccess::holder_map(&*this);
+
+                    rooted!(in(*cx) let mut holder = ptr::null_mut::<JSObject>());
+                    proxyhandler::ensure_cross_origin_property_holder(
+                        cx,
+                        holder_map,
+                        &CROSS_ORIGIN_PROPERTIES,
+                        holder.handle_mut().into(),
+                    );
+
                     if !proxyhandler::cross_origin_get_own_property_helper(
-                        cx, proxy, &CROSS_ORIGIN_PROPERTIES, id, desc
+                        cx, proxy, holder.handle().into(), id, desc
                     ) {
                         return false;
                     }
@@ -5699,7 +5710,19 @@ class CGDOMJSProxyHandler_ownPropertyKeys(CGAbstractExternMethod):
             body += dedent(
                 """
                 if !proxyhandler::is_platform_object_same_origin(cx, proxy) {
-                    return proxyhandler::cross_origin_own_property_keys(cx, proxy, &CROSS_ORIGIN_PROPERTIES, props);
+                    let this = UnwrapProxy(proxy);
+                    let holder_map = CrossOriginPropertiesHolderMapAccess::holder_map(&*this);
+
+                    rooted!(in(*cx) let mut holder = ptr::null_mut::<JSObject>());
+                    proxyhandler::ensure_cross_origin_property_holder(
+                        cx,
+                        holder_map,
+                        &CROSS_ORIGIN_PROPERTIES,
+                        holder.handle_mut().into(),
+                    );
+
+                    return proxyhandler::cross_origin_own_property_keys(
+                        cx, holder.handle().into(), props);
                 }
 
                 // Safe to enter the Realm of proxy now.
@@ -5821,7 +5844,18 @@ class CGDOMJSProxyHandler_hasOwn(CGAbstractExternMethod):
             indexed += dedent(
                 """
                 if !proxyhandler::is_platform_object_same_origin(cx, proxy) {
-                    return proxyhandler::cross_origin_has_own(cx, proxy, &CROSS_ORIGIN_PROPERTIES, id, bp);
+                    let this = UnwrapProxy(proxy);
+                    let holder_map = CrossOriginPropertiesHolderMapAccess::holder_map(&*this);
+
+                    rooted!(in(*cx) let mut holder = ptr::null_mut::<JSObject>());
+                    proxyhandler::ensure_cross_origin_property_holder(
+                        cx,
+                        holder_map,
+                        &CROSS_ORIGIN_PROPERTIES,
+                        holder.handle_mut().into(),
+                    );
+
+                    return proxyhandler::cross_origin_has_own(cx, holder.handle().into(), id, bp);
                 }
 
                 // Safe to enter the Realm of proxy now.
@@ -6523,6 +6557,7 @@ def generate_imports(config, cgthings, descriptors, callbacks=None, dictionaries
         'crate::dom::bindings::proxyhandler::ensure_expando_object',
         'crate::dom::bindings::proxyhandler::fill_property_descriptor',
         'crate::dom::bindings::proxyhandler::get_expando_object',
+        'crate::dom::bindings::proxyhandler::CrossOriginPropertiesHolderMapAccess',
         'crate::dom::bindings::record::Record',
         'std::ptr::NonNull',
         'crate::dom::bindings::num::Finite',
