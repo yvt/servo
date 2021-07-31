@@ -1,6 +1,6 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 extern crate phf_codegen;
 
@@ -10,22 +10,24 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 fn main() {
-    let path = Path::new(&env::var("OUT_DIR").unwrap())
+    let path = Path::new(&env::var_os("OUT_DIR").unwrap())
         .join("ascii_case_insensitive_html_attributes.rs");
     let mut file = BufWriter::new(File::create(&path).unwrap());
 
-    write!(&mut file, "{{ static SET: ::phf::Set<&'static str> = ",
-    ).unwrap();
     let mut set = phf_codegen::Set::new();
     for name in ASCII_CASE_INSENSITIVE_HTML_ATTRIBUTES.split_whitespace() {
         set.entry(name);
     }
-    set.build(&mut file).unwrap();
-    write!(&mut file, "; &SET }}").unwrap();
+    write!(
+        &mut file,
+        "{{ static SET: ::phf::Set<&'static str> = {}; &SET }}",
+        set.build(),
+    )
+    .unwrap();
 }
 
-/// https://html.spec.whatwg.org/multipage/#selectors
-static ASCII_CASE_INSENSITIVE_HTML_ATTRIBUTES: &'static str = r#"
+/// <https://html.spec.whatwg.org/multipage/#selectors>
+static ASCII_CASE_INSENSITIVE_HTML_ATTRIBUTES: &str = r#"
     accept
     accept-charset
     align

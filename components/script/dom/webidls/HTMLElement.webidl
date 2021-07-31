@@ -1,26 +1,33 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // https://html.spec.whatwg.org/multipage/#htmlelement
-[HTMLConstructor]
+[Exposed=Window]
 interface HTMLElement : Element {
+  [HTMLConstructor] constructor();
+
   // metadata attributes
   [CEReactions]
            attribute DOMString title;
   [CEReactions]
            attribute DOMString lang;
-  // [CEReactions]
-  //         attribute boolean translate;
-  // [CEReactions]
-  //         attribute DOMString dir;
+  [CEReactions]
+           attribute boolean translate;
+  [CEReactions]
+           attribute DOMString dir;
   readonly attribute DOMStringMap dataset;
 
   // microdata
   //         attribute boolean itemScope;
+
   //         attribute DOMString itemId;
   //readonly attribute HTMLPropertiesCollection properties;
   //         attribute any itemValue; // acts as DOMString on setting
+  [Pref="dom.microdata.testing.enabled"]
+  sequence<DOMString>? propertyNames();
+  [Pref="dom.microdata.testing.enabled"]
+  sequence<DOMString>? itemtypes();
 
   // user interaction
   [CEReactions]
@@ -41,6 +48,8 @@ interface HTMLElement : Element {
   //         attribute boolean spellcheck;
   // void forceSpellCheck();
 
+  attribute [TreatNullAs=EmptyString] DOMString innerText;
+
   // command API
   // readonly attribute DOMString? commandType;
   // readonly attribute DOMString? commandLabel;
@@ -60,7 +69,7 @@ partial interface HTMLElement {
   readonly attribute long offsetHeight;
 };
 
-HTMLElement implements GlobalEventHandlers;
-HTMLElement implements DocumentAndElementEventHandlers;
-HTMLElement implements ElementContentEditable;
-HTMLElement implements ElementCSSInlineStyle;
+HTMLElement includes GlobalEventHandlers;
+HTMLElement includes DocumentAndElementEventHandlers;
+HTMLElement includes ElementContentEditable;
+HTMLElement includes ElementCSSInlineStyle;

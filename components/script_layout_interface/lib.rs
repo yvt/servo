@@ -1,64 +1,40 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! This module contains traits in script used generically in the rest of Servo.
 //! The traits are here instead of in script so that these modules won't have
 //! to depend on script.
 
 #![deny(unsafe_code)]
-#![feature(box_syntax)]
-#![feature(nonzero)]
 
-extern crate app_units;
-extern crate atomic_refcell;
-extern crate canvas_traits;
-extern crate core;
-extern crate cssparser;
-extern crate euclid;
-extern crate gfx_traits;
-extern crate heapsize;
-#[macro_use] extern crate heapsize_derive;
-#[macro_use] extern crate html5ever;
-extern crate ipc_channel;
-extern crate libc;
 #[macro_use]
-extern crate log;
-extern crate metrics;
-extern crate msg;
-extern crate net_traits;
-extern crate profile_traits;
-extern crate range;
-extern crate script_traits;
-extern crate selectors;
-extern crate servo_arc;
-extern crate servo_atoms;
-extern crate servo_url;
-extern crate style;
-extern crate webrender_api;
+extern crate html5ever;
+#[macro_use]
+extern crate malloc_size_of_derive;
 
 pub mod message;
-pub mod reporter;
 pub mod rpc;
 pub mod wrapper_traits;
 
 use atomic_refcell::AtomicRefCell;
-use canvas_traits::canvas::CanvasMsg;
-use core::nonzero::NonZero;
+use canvas_traits::canvas::{CanvasId, CanvasMsg};
 use ipc_channel::ipc::IpcSender;
 use libc::c_void;
 use net_traits::image_cache::PendingImageId;
 use script_traits::UntrustedNodeAddress;
-use servo_url::ServoUrl;
+use servo_url::{ImmutableOrigin, ServoUrl};
+use std::any::Any;
 use std::sync::atomic::AtomicIsize;
 use style::data::ElementData;
 
-#[repr(C)]
+#[derive(MallocSizeOf)]
 pub struct StyleData {
     /// Data that the style system associates with a node. When the
     /// style system is being used standalone, this is all that hangs
     /// off the node. This must be first to permit the various
     /// transmutations between ElementData and PersistentLayoutData.
+    #[ignore_malloc_size_of = "This probably should not be ignored"]
     pub element_data: AtomicRefCell<ElementData>,
 
     /// Information needed during parallel traversals.
@@ -74,19 +50,35 @@ impl StyleData {
     }
 }
 
-#[derive(Clone, Copy, HeapSizeOf)]
-pub struct OpaqueStyleAndLayoutData {
-    // NB: We really store a `StyleAndLayoutData` here, so be careful!
-    #[ignore_heap_size_of = "TODO(#6910) Box value that should be counted but \
-                             the type lives in layout"]
-    pub ptr: NonZero<*mut StyleData>
+pub type StyleAndOpaqueLayoutData = StyleAndGenericData<dyn Any + Send + Sync>;
+
+#[derive(MallocSizeOf)]
+pub struct StyleAndGenericData<T>
+where
+    T: ?Sized,
+{
+    /// The style data.
+    pub style_data: StyleData,
+    /// The opaque layout data.
+    #[ignore_malloc_size_of = "Trait objects are hard"]
+    pub generic_data: T,
 }
 
-#[allow(unsafe_code)]
-unsafe impl Send for OpaqueStyleAndLayoutData {}
+impl StyleAndOpaqueLayoutData {
+    #[inline]
+    pub fn new<T>(style_data: StyleData, layout_data: T) -> Box<Self>
+    where
+        T: Any + Send + Sync,
+    {
+        Box::new(StyleAndGenericData {
+            style_data,
+            generic_data: layout_data,
+        })
+    }
+}
 
 /// Information that we need stored in each DOM node.
-#[derive(HeapSizeOf)]
+#[derive(MallocSizeOf)]
 pub struct DomParallelInfo {
     /// The number of children remaining to process during bottom-up traversal.
     pub children_to_process: AtomicIsize,
@@ -100,7 +92,6 @@ impl DomParallelInfo {
     }
 }
 
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LayoutNodeType {
     Element(LayoutElementType),
@@ -110,11 +101,16 @@ pub enum LayoutNodeType {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LayoutElementType {
     Element,
+    HTMLBodyElement,
+    HTMLBRElement,
     HTMLCanvasElement,
+    HTMLHtmlElement,
     HTMLIFrameElement,
     HTMLImageElement,
     HTMLInputElement,
+    HTMLMediaElement,
     HTMLObjectElement,
+    HTMLParagraphElement,
     HTMLTableCellElement,
     HTMLTableColElement,
     HTMLTableElement,
@@ -126,13 +122,15 @@ pub enum LayoutElementType {
 
 pub enum HTMLCanvasDataSource {
     WebGL(webrender_api::ImageKey),
-    Image(Option<IpcSender<CanvasMsg>>)
+    Image(Option<IpcSender<CanvasMsg>>),
+    WebGPU(webrender_api::ImageKey),
 }
 
 pub struct HTMLCanvasData {
     pub source: HTMLCanvasDataSource,
     pub width: u32,
     pub height: u32,
+    pub canvas_id: CanvasId,
 }
 
 pub struct SVGSVGData {
@@ -147,11 +145,6 @@ pub struct TrustedNodeAddress(pub *const c_void);
 #[allow(unsafe_code)]
 unsafe impl Send for TrustedNodeAddress {}
 
-pub fn is_image_data(uri: &str) -> bool {
-    static TYPES: &'static [&'static str] = &["data:image/png", "data:image/gif", "data:image/jpeg"];
-    TYPES.iter().any(|&type_| uri.starts_with(type_))
-}
-
 /// Whether the pending image needs to be fetched or is waiting on an existing fetch.
 pub enum PendingImageState {
     Unrequested(ServoUrl),
@@ -165,4 +158,9 @@ pub struct PendingImage {
     pub state: PendingImageState,
     pub node: UntrustedNodeAddress,
     pub id: PendingImageId,
+    pub origin: ImmutableOrigin,
+}
+
+pub struct HTMLMediaData {
+    pub current_frame: Option<(webrender_api::ImageKey, i32, i32)>,
 }

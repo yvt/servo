@@ -1,44 +1,48 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use crate::dom::attr::Attr;
+use crate::dom::bindings::cell::DomRefCell;
+use crate::dom::bindings::codegen::Bindings::DOMTokenListBinding::DOMTokenListBinding::DOMTokenListMethods;
+use crate::dom::bindings::codegen::Bindings::HTMLLinkElementBinding::HTMLLinkElementMethods;
+use crate::dom::bindings::inheritance::Castable;
+use crate::dom::bindings::root::{DomRoot, MutNullableDom};
+use crate::dom::bindings::str::{DOMString, USVString};
+use crate::dom::cssstylesheet::CSSStyleSheet;
+use crate::dom::document::Document;
+use crate::dom::domtokenlist::DOMTokenList;
+use crate::dom::element::{
+    cors_setting_for_element, reflect_cross_origin_attribute, reflect_referrer_policy_attribute,
+    set_cross_origin_attribute,
+};
+use crate::dom::element::{AttributeMutation, Element, ElementCreator};
+use crate::dom::htmlelement::HTMLElement;
+use crate::dom::node::{
+    document_from_node, stylesheets_owner_from_node, window_from_node, BindContext, Node,
+    UnbindContext,
+};
+use crate::dom::stylesheet::StyleSheet as DOMStyleSheet;
+use crate::dom::virtualmethods::VirtualMethods;
+use crate::stylesheet_loader::{StylesheetContextSource, StylesheetLoader, StylesheetOwner};
 use cssparser::{Parser as CssParser, ParserInput};
-use dom::attr::Attr;
-use dom::bindings::cell::DOMRefCell;
-use dom::bindings::codegen::Bindings::DOMTokenListBinding::DOMTokenListBinding::DOMTokenListMethods;
-use dom::bindings::codegen::Bindings::HTMLLinkElementBinding;
-use dom::bindings::codegen::Bindings::HTMLLinkElementBinding::HTMLLinkElementMethods;
-use dom::bindings::inheritance::Castable;
-use dom::bindings::js::{MutNullableJS, Root, RootedReference};
-use dom::bindings::str::DOMString;
-use dom::cssstylesheet::CSSStyleSheet;
-use dom::document::Document;
-use dom::domtokenlist::DOMTokenList;
-use dom::element::{AttributeMutation, Element, ElementCreator};
-use dom::element::{cors_setting_for_element, reflect_cross_origin_attribute, set_cross_origin_attribute};
-use dom::globalscope::GlobalScope;
-use dom::htmlelement::HTMLElement;
-use dom::node::{Node, UnbindContext, document_from_node, window_from_node};
-use dom::stylesheet::StyleSheet as DOMStyleSheet;
-use dom::virtualmethods::VirtualMethods;
 use dom_struct::dom_struct;
+use embedder_traits::EmbedderMsg;
 use html5ever::{LocalName, Prefix};
 use net_traits::ReferrerPolicy;
-use script_traits::{MozBrowserEvent, ScriptMsg};
 use servo_arc::Arc;
-use std::ascii::AsciiExt;
+use servo_atoms::Atom;
 use std::borrow::ToOwned;
 use std::cell::Cell;
 use std::default::Default;
 use style::attr::AttrValue;
-use style::media_queries::parse_media_query_list;
+use style::media_queries::MediaList;
 use style::parser::ParserContext as CssParserContext;
 use style::str::HTML_SPACE_CHARACTERS;
-use style::stylesheets::{CssRuleType, Stylesheet};
-use style_traits::PARSING_MODE_DEFAULT;
-use stylesheet_loader::{StylesheetLoader, StylesheetContextSource, StylesheetOwner};
+use style::stylesheets::{CssRuleType, Origin, Stylesheet};
+use style_traits::ParsingMode;
 
-#[derive(Clone, Copy, HeapSizeOf, JSTraceable, PartialEq)]
+#[derive(Clone, Copy, JSTraceable, MallocSizeOf, PartialEq)]
 pub struct RequestGenerationId(u32);
 
 impl RequestGenerationId {
@@ -50,12 +54,12 @@ impl RequestGenerationId {
 #[dom_struct]
 pub struct HTMLLinkElement {
     htmlelement: HTMLElement,
-    rel_list: MutNullableJS<DOMTokenList>,
-    #[ignore_heap_size_of = "Arc"]
-    stylesheet: DOMRefCell<Option<Arc<Stylesheet>>>,
-    cssom_stylesheet: MutNullableJS<CSSStyleSheet>,
+    rel_list: MutNullableDom<DOMTokenList>,
+    #[ignore_malloc_size_of = "Arc"]
+    stylesheet: DomRefCell<Option<Arc<Stylesheet>>>,
+    cssom_stylesheet: MutNullableDom<CSSStyleSheet>,
 
-    /// https://html.spec.whatwg.org/multipage/#a-style-sheet-that-is-blocking-scripts
+    /// <https://html.spec.whatwg.org/multipage/#a-style-sheet-that-is-blocking-scripts>
     parser_inserted: Cell<bool>,
     /// The number of loads that this link element has triggered (could be more
     /// than one because of imports) and have not yet finished.
@@ -67,14 +71,18 @@ pub struct HTMLLinkElement {
 }
 
 impl HTMLLinkElement {
-    fn new_inherited(local_name: LocalName, prefix: Option<Prefix>, document: &Document,
-                     creator: ElementCreator) -> HTMLLinkElement {
+    fn new_inherited(
+        local_name: LocalName,
+        prefix: Option<Prefix>,
+        document: &Document,
+        creator: ElementCreator,
+    ) -> HTMLLinkElement {
         HTMLLinkElement {
             htmlelement: HTMLElement::new_inherited(local_name, prefix, document),
             rel_list: Default::default(),
             parser_inserted: Cell::new(creator.is_parser_created()),
-            stylesheet: DOMRefCell::new(None),
-            cssom_stylesheet: MutNullableJS::new(None),
+            stylesheet: DomRefCell::new(None),
+            cssom_stylesheet: MutNullableDom::new(None),
             pending_loads: Cell::new(0),
             any_failed_load: Cell::new(false),
             request_generation_id: Cell::new(RequestGenerationId(0)),
@@ -82,13 +90,18 @@ impl HTMLLinkElement {
     }
 
     #[allow(unrooted_must_root)]
-    pub fn new(local_name: LocalName,
-               prefix: Option<Prefix>,
-               document: &Document,
-               creator: ElementCreator) -> Root<HTMLLinkElement> {
-        Node::reflect_node(box HTMLLinkElement::new_inherited(local_name, prefix, document, creator),
-                           document,
-                           HTMLLinkElementBinding::Wrap)
+    pub fn new(
+        local_name: LocalName,
+        prefix: Option<Prefix>,
+        document: &Document,
+        creator: ElementCreator,
+    ) -> DomRoot<HTMLLinkElement> {
+        Node::reflect_node(
+            Box::new(HTMLLinkElement::new_inherited(
+                local_name, prefix, document, creator,
+            )),
+            document,
+        )
     }
 
     pub fn get_request_generation_id(&self) -> RequestGenerationId {
@@ -97,29 +110,32 @@ impl HTMLLinkElement {
 
     // FIXME(emilio): These methods are duplicated with
     // HTMLStyleElement::set_stylesheet.
+    #[allow(unrooted_must_root)]
     pub fn set_stylesheet(&self, s: Arc<Stylesheet>) {
-        let doc = document_from_node(self);
+        let stylesheets_owner = stylesheets_owner_from_node(self);
         if let Some(ref s) = *self.stylesheet.borrow() {
-            doc.remove_stylesheet(self.upcast(), s)
+            stylesheets_owner.remove_stylesheet(self.upcast(), s)
         }
         *self.stylesheet.borrow_mut() = Some(s.clone());
-        self.cssom_stylesheet.set(None);
-        doc.add_stylesheet(self.upcast(), s);
+        self.clean_stylesheet_ownership();
+        stylesheets_owner.add_stylesheet(self.upcast(), s);
     }
 
     pub fn get_stylesheet(&self) -> Option<Arc<Stylesheet>> {
         self.stylesheet.borrow().clone()
     }
 
-    pub fn get_cssom_stylesheet(&self) -> Option<Root<CSSStyleSheet>> {
+    pub fn get_cssom_stylesheet(&self) -> Option<DomRoot<CSSStyleSheet>> {
         self.get_stylesheet().map(|sheet| {
             self.cssom_stylesheet.or_init(|| {
-                CSSStyleSheet::new(&window_from_node(self),
-                                   self.upcast::<Element>(),
-                                   "text/css".into(),
-                                   None, // todo handle location
-                                   None, // todo handle title
-                                   sheet)
+                CSSStyleSheet::new(
+                    &window_from_node(self),
+                    self.upcast::<Element>(),
+                    "text/css".into(),
+                    None, // todo handle location
+                    None, // todo handle title
+                    sheet,
+                )
             })
         })
     }
@@ -127,12 +143,18 @@ impl HTMLLinkElement {
     pub fn is_alternate(&self) -> bool {
         let rel = get_attr(self.upcast(), &local_name!("rel"));
         match rel {
-            Some(ref value) => {
-                value.split(HTML_SPACE_CHARACTERS)
-                    .any(|s| s.eq_ignore_ascii_case("alternate"))
-            },
+            Some(ref value) => value
+                .split(HTML_SPACE_CHARACTERS)
+                .any(|s| s.eq_ignore_ascii_case("alternate")),
             None => false,
         }
+    }
+
+    fn clean_stylesheet_ownership(&self) {
+        if let Some(cssom_stylesheet) = self.cssom_stylesheet.get() {
+            cssom_stylesheet.set_owner(None);
+        }
+        self.cssom_stylesheet.set(None);
     }
 }
 
@@ -146,35 +168,33 @@ fn get_attr(element: &Element, local_name: &LocalName) -> Option<String> {
 
 fn string_is_stylesheet(value: &Option<String>) -> bool {
     match *value {
-        Some(ref value) => {
-            value.split(HTML_SPACE_CHARACTERS)
-                .any(|s| s.eq_ignore_ascii_case("stylesheet"))
-        },
+        Some(ref value) => value
+            .split(HTML_SPACE_CHARACTERS)
+            .any(|s| s.eq_ignore_ascii_case("stylesheet")),
         None => false,
     }
 }
 
 /// Favicon spec usage in accordance with CEF implementation:
 /// only url of icon is required/used
-/// https://html.spec.whatwg.org/multipage/#rel-icon
+/// <https://html.spec.whatwg.org/multipage/#rel-icon>
 fn is_favicon(value: &Option<String>) -> bool {
     match *value {
-        Some(ref value) => {
-            value.split(HTML_SPACE_CHARACTERS)
-                .any(|s| s.eq_ignore_ascii_case("icon") || s.eq_ignore_ascii_case("apple-touch-icon"))
-        },
+        Some(ref value) => value
+            .split(HTML_SPACE_CHARACTERS)
+            .any(|s| s.eq_ignore_ascii_case("icon") || s.eq_ignore_ascii_case("apple-touch-icon")),
         None => false,
     }
 }
 
 impl VirtualMethods for HTMLLinkElement {
-    fn super_type(&self) -> Option<&VirtualMethods> {
-        Some(self.upcast::<HTMLElement>() as &VirtualMethods)
+    fn super_type(&self) -> Option<&dyn VirtualMethods> {
+        Some(self.upcast::<HTMLElement>() as &dyn VirtualMethods)
     }
 
     fn attribute_mutated(&self, attr: &Attr, mutation: AttributeMutation) {
         self.super_type().unwrap().attribute_mutated(attr, mutation);
-        if !self.upcast::<Node>().is_in_doc() || mutation.is_removal() {
+        if !self.upcast::<Node>().is_connected() || mutation.is_removal() {
             return;
         }
 
@@ -191,14 +211,11 @@ impl VirtualMethods for HTMLLinkElement {
             &local_name!("sizes") => {
                 if is_favicon(&rel) {
                     if let Some(ref href) = get_attr(self.upcast(), &local_name!("href")) {
-                        self.handle_favicon_url(rel.as_ref().unwrap(), href, &Some(attr.value().to_string()));
-                    }
-                }
-            },
-            &local_name!("media") => {
-                if string_is_stylesheet(&rel) {
-                    if let Some(href) = self.upcast::<Element>().get_attribute(&ns!(), &local_name!("href")) {
-                        self.handle_stylesheet_url(&href.value());
+                        self.handle_favicon_url(
+                            rel.as_ref().unwrap(),
+                            href,
+                            &Some(attr.value().to_string()),
+                        );
                     }
                 }
             },
@@ -209,16 +226,19 @@ impl VirtualMethods for HTMLLinkElement {
     fn parse_plain_attribute(&self, name: &LocalName, value: DOMString) -> AttrValue {
         match name {
             &local_name!("rel") => AttrValue::from_serialized_tokenlist(value.into()),
-            _ => self.super_type().unwrap().parse_plain_attribute(name, value),
+            _ => self
+                .super_type()
+                .unwrap()
+                .parse_plain_attribute(name, value),
         }
     }
 
-    fn bind_to_tree(&self, tree_in_doc: bool) {
+    fn bind_to_tree(&self, context: &BindContext) {
         if let Some(ref s) = self.super_type() {
-            s.bind_to_tree(tree_in_doc);
+            s.bind_to_tree(context);
         }
 
-        if tree_in_doc {
+        if context.tree_connected {
             let element = self.upcast();
 
             let rel = get_attr(element, &local_name!("rel"));
@@ -228,11 +248,11 @@ impl VirtualMethods for HTMLLinkElement {
             match href {
                 Some(ref href) if string_is_stylesheet(&rel) => {
                     self.handle_stylesheet_url(href);
-                }
+                },
                 Some(ref href) if is_favicon(&rel) => {
                     self.handle_favicon_url(rel.as_ref().unwrap(), href, &sizes);
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
     }
@@ -243,14 +263,14 @@ impl VirtualMethods for HTMLLinkElement {
         }
 
         if let Some(s) = self.stylesheet.borrow_mut().take() {
-            document_from_node(self).remove_stylesheet(self.upcast(), &s);
+            self.clean_stylesheet_ownership();
+            stylesheets_owner_from_node(self).remove_stylesheet(self.upcast(), &s);
         }
     }
 }
 
-
 impl HTMLLinkElement {
-    /// https://html.spec.whatwg.org/multipage/#concept-link-obtain
+    /// <https://html.spec.whatwg.org/multipage/#concept-link-obtain>
     fn handle_stylesheet_url(&self, href: &str) {
         let document = document_from_node(self);
         if document.browsing_context().is_none() {
@@ -268,7 +288,7 @@ impl HTMLLinkElement {
             Err(e) => {
                 debug!("Parsing url {} failed: {}", href, e);
                 return;
-            }
+            },
         };
 
         let element = self.upcast::<Element>();
@@ -277,7 +297,7 @@ impl HTMLLinkElement {
         let cors_setting = cors_setting_for_element(element);
 
         let mq_attribute = element.get_attribute(&ns!(), &local_name!("media"));
-        let value = mq_attribute.r().map(|a| a.value());
+        let value = mq_attribute.as_ref().map(|a| a.value());
         let mq_str = match value {
             Some(ref value) => &***value,
             None => "",
@@ -286,44 +306,53 @@ impl HTMLLinkElement {
         let mut input = ParserInput::new(&mq_str);
         let mut css_parser = CssParser::new(&mut input);
         let doc_url = document.url();
-        let context = CssParserContext::new_for_cssom(&doc_url, Some(CssRuleType::Media),
-                                                      PARSING_MODE_DEFAULT,
-                                                      document.quirks_mode());
         let window = document.window();
-        let media = parse_media_query_list(&context, &mut css_parser,
-                                           window.css_error_reporter());
+        // FIXME(emilio): This looks somewhat fishy, since we use the context
+        // only to parse the media query list, CssRuleType::Media doesn't make
+        // much sense.
+        let context = CssParserContext::new(
+            Origin::Author,
+            &doc_url,
+            Some(CssRuleType::Media),
+            ParsingMode::DEFAULT,
+            document.quirks_mode(),
+            window.css_error_reporter(),
+            None,
+        );
+        let media = MediaList::parse(&context, &mut css_parser);
 
         let im_attribute = element.get_attribute(&ns!(), &local_name!("integrity"));
-        let integrity_val = im_attribute.r().map(|a| a.value());
+        let integrity_val = im_attribute.as_ref().map(|a| a.value());
         let integrity_metadata = match integrity_val {
             Some(ref value) => &***value,
             None => "",
         };
 
-        self.request_generation_id.set(self.request_generation_id.get().increment());
+        self.request_generation_id
+            .set(self.request_generation_id.get().increment());
 
         // TODO: #8085 - Don't load external stylesheets if the node's mq
         // doesn't match.
         let loader = StylesheetLoader::for_element(self.upcast());
-        loader.load(StylesheetContextSource::LinkElement {
-            media: Some(media),
-        }, link_url, cors_setting, integrity_metadata.to_owned());
+        loader.load(
+            StylesheetContextSource::LinkElement { media: Some(media) },
+            link_url,
+            cors_setting,
+            integrity_metadata.to_owned(),
+        );
     }
 
-    fn handle_favicon_url(&self, rel: &str, href: &str, sizes: &Option<String>) {
+    fn handle_favicon_url(&self, _rel: &str, href: &str, _sizes: &Option<String>) {
         let document = document_from_node(self);
         match document.base_url().join(href) {
             Ok(url) => {
-                let event = ScriptMsg::NewFavicon(url.clone());
-                document.window().upcast::<GlobalScope>().script_to_constellation_chan().send(event).unwrap();
-
-                let mozbrowser_event = match *sizes {
-                    Some(ref sizes) => MozBrowserEvent::IconChange(rel.to_owned(), url.to_string(), sizes.to_owned()),
-                    None => MozBrowserEvent::IconChange(rel.to_owned(), url.to_string(), "".to_owned())
-                };
-                document.trigger_mozbrowser_event(mozbrowser_event);
-            }
-            Err(e) => debug!("Parsing url {} failed: {}", href, e)
+                let window = document.window();
+                if window.is_top_level() {
+                    let msg = EmbedderMsg::NewFavicon(url.clone());
+                    window.send_to_embedder(msg);
+                }
+            },
+            Err(e) => debug!("Parsing url {} failed: {}", href, e),
         }
     }
 }
@@ -355,7 +384,7 @@ impl StylesheetOwner for HTMLLinkElement {
 
     fn referrer_policy(&self) -> Option<ReferrerPolicy> {
         if self.RelList().Contains("noreferrer".into()) {
-            return Some(ReferrerPolicy::NoReferrer)
+            return Some(ReferrerPolicy::NoReferrer);
         }
 
         None
@@ -373,14 +402,15 @@ impl HTMLLinkElementMethods for HTMLLinkElement {
     make_url_getter!(Href, "href");
 
     // https://html.spec.whatwg.org/multipage/#dom-link-href
-    make_setter!(SetHref, "href");
+    make_url_setter!(SetHref, "href");
 
     // https://html.spec.whatwg.org/multipage/#dom-link-rel
     make_getter!(Rel, "rel");
 
     // https://html.spec.whatwg.org/multipage/#dom-link-rel
     fn SetRel(&self, rel: DOMString) {
-        self.upcast::<Element>().set_tokenlist_attribute(&local_name!("rel"), rel);
+        self.upcast::<Element>()
+            .set_tokenlist_attribute(&local_name!("rel"), rel);
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-link-media
@@ -408,8 +438,30 @@ impl HTMLLinkElementMethods for HTMLLinkElement {
     make_setter!(SetType, "type");
 
     // https://html.spec.whatwg.org/multipage/#dom-link-rellist
-    fn RelList(&self) -> Root<DOMTokenList> {
-        self.rel_list.or_init(|| DOMTokenList::new(self.upcast(), &local_name!("rel")))
+    fn RelList(&self) -> DomRoot<DOMTokenList> {
+        self.rel_list.or_init(|| {
+            DOMTokenList::new(
+                self.upcast(),
+                &local_name!("rel"),
+                Some(vec![
+                    Atom::from("alternate"),
+                    Atom::from("apple-touch-icon"),
+                    Atom::from("apple-touch-icon-precomposed"),
+                    Atom::from("canonical"),
+                    Atom::from("dns-prefetch"),
+                    Atom::from("icon"),
+                    Atom::from("import"),
+                    Atom::from("manifest"),
+                    Atom::from("modulepreload"),
+                    Atom::from("next"),
+                    Atom::from("preconnect"),
+                    Atom::from("prefetch"),
+                    Atom::from("preload"),
+                    Atom::from("prerender"),
+                    Atom::from("stylesheet"),
+                ]),
+            )
+        })
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-link-charset
@@ -440,8 +492,16 @@ impl HTMLLinkElementMethods for HTMLLinkElement {
         set_cross_origin_attribute(self.upcast::<Element>(), value);
     }
 
+    // https://html.spec.whatwg.org/multipage/#dom-link-referrerpolicy
+    fn ReferrerPolicy(&self) -> DOMString {
+        reflect_referrer_policy_attribute(self.upcast::<Element>())
+    }
+
+    // https://html.spec.whatwg.org/multipage/#dom-link-referrerpolicy
+    make_setter!(SetReferrerPolicy, "referrerpolicy");
+
     // https://drafts.csswg.org/cssom/#dom-linkstyle-sheet
-    fn GetSheet(&self) -> Option<Root<DOMStyleSheet>> {
-        self.get_cssom_stylesheet().map(Root::upcast)
+    fn GetSheet(&self) -> Option<DomRoot<DOMStyleSheet>> {
+        self.get_cssom_stylesheet().map(DomRoot::upcast)
     }
 }

@@ -1,17 +1,21 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // https://html.spec.whatwg.org/multipage/#customelementregistry
-[Pref="dom.customelements.enabled"]
+[Exposed=Window, Pref="dom.custom_elements.enabled"]
 interface CustomElementRegistry {
   [Throws, CEReactions]
-  void define(DOMString name, Function constructor_, optional ElementDefinitionOptions options);
+  void define(DOMString name, CustomElementConstructor constructor_, optional ElementDefinitionOptions options = {});
 
   any get(DOMString name);
 
-  Promise<void> whenDefined(DOMString name);
+  Promise<CustomElementConstructor> whenDefined(DOMString name);
+
+  [CEReactions] void upgrade(Node root);
 };
+
+callback CustomElementConstructor = HTMLElement();
 
 dictionary ElementDefinitionOptions {
   DOMString extends;

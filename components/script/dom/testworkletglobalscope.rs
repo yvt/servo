@@ -1,21 +1,22 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use dom::bindings::cell::DOMRefCell;
-use dom::bindings::codegen::Bindings::TestWorkletGlobalScopeBinding;
-use dom::bindings::codegen::Bindings::TestWorkletGlobalScopeBinding::TestWorkletGlobalScopeMethods;
-use dom::bindings::js::Root;
-use dom::bindings::str::DOMString;
-use dom::worklet::WorkletExecutor;
-use dom::workletglobalscope::WorkletGlobalScope;
-use dom::workletglobalscope::WorkletGlobalScopeInit;
+use crate::dom::bindings::cell::DomRefCell;
+use crate::dom::bindings::codegen::Bindings::TestWorkletGlobalScopeBinding;
+use crate::dom::bindings::codegen::Bindings::TestWorkletGlobalScopeBinding::TestWorkletGlobalScopeMethods;
+use crate::dom::bindings::root::DomRoot;
+use crate::dom::bindings::str::DOMString;
+use crate::dom::worklet::WorkletExecutor;
+use crate::dom::workletglobalscope::WorkletGlobalScope;
+use crate::dom::workletglobalscope::WorkletGlobalScopeInit;
+use crate::script_runtime::JSContext;
+use crossbeam_channel::Sender;
 use dom_struct::dom_struct;
 use js::rust::Runtime;
 use msg::constellation_msg::PipelineId;
 use servo_url::ServoUrl;
 use std::collections::HashMap;
-use std::sync::mpsc::Sender;
 
 // check-tidy: no specs after this line
 
@@ -24,24 +25,32 @@ pub struct TestWorkletGlobalScope {
     // The worklet global for this object
     worklet_global: WorkletGlobalScope,
     // The key/value pairs
-    lookup_table: DOMRefCell<HashMap<String, String>>,
+    lookup_table: DomRefCell<HashMap<String, String>>,
 }
 
 impl TestWorkletGlobalScope {
     #[allow(unsafe_code)]
-    pub fn new(runtime: &Runtime,
-               pipeline_id: PipelineId,
-               base_url: ServoUrl,
-               executor: WorkletExecutor,
-               init: &WorkletGlobalScopeInit)
-               -> Root<TestWorkletGlobalScope>
-    {
-        debug!("Creating test worklet global scope for pipeline {}.", pipeline_id);
-        let global = box TestWorkletGlobalScope {
-            worklet_global: WorkletGlobalScope::new_inherited(pipeline_id, base_url, executor, init),
+    pub fn new(
+        runtime: &Runtime,
+        pipeline_id: PipelineId,
+        base_url: ServoUrl,
+        executor: WorkletExecutor,
+        init: &WorkletGlobalScopeInit,
+    ) -> DomRoot<TestWorkletGlobalScope> {
+        debug!(
+            "Creating test worklet global scope for pipeline {}.",
+            pipeline_id
+        );
+        let global = Box::new(TestWorkletGlobalScope {
+            worklet_global: WorkletGlobalScope::new_inherited(
+                pipeline_id,
+                base_url,
+                executor,
+                init,
+            ),
             lookup_table: Default::default(),
-        };
-        unsafe { TestWorkletGlobalScopeBinding::Wrap(runtime.cx(), global) }
+        });
+        unsafe { TestWorkletGlobalScopeBinding::Wrap(JSContext::from_ptr(runtime.cx()), global) }
     }
 
     pub fn perform_a_worklet_task(&self, task: TestWorkletTask) {
@@ -50,7 +59,7 @@ impl TestWorkletGlobalScope {
                 debug!("Looking up key {}.", key);
                 let result = self.lookup_table.borrow().get(&key).cloned();
                 let _ = sender.send(result);
-            }
+            },
         }
     }
 }
@@ -58,7 +67,9 @@ impl TestWorkletGlobalScope {
 impl TestWorkletGlobalScopeMethods for TestWorkletGlobalScope {
     fn RegisterKeyValue(&self, key: DOMString, value: DOMString) {
         debug!("Registering test worklet key/value {}/{}.", key, value);
-        self.lookup_table.borrow_mut().insert(String::from(key), String::from(value));
+        self.lookup_table
+            .borrow_mut()
+            .insert(String::from(key), String::from(value));
     }
 }
 

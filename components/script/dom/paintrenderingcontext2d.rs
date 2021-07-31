@@ -1,34 +1,31 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasFillRule;
+use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasImageSource;
+use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasLineCap;
+use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasLineJoin;
+use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasRenderingContext2DMethods;
+use crate::dom::bindings::codegen::Bindings::PaintRenderingContext2DBinding::PaintRenderingContext2DMethods;
+use crate::dom::bindings::codegen::UnionTypes::StringOrCanvasGradientOrCanvasPattern;
+use crate::dom::bindings::error::ErrorResult;
+use crate::dom::bindings::error::Fallible;
+use crate::dom::bindings::inheritance::Castable;
+use crate::dom::bindings::num::Finite;
+use crate::dom::bindings::reflector::reflect_dom_object;
+use crate::dom::bindings::root::DomRoot;
+use crate::dom::bindings::str::DOMString;
+use crate::dom::canvasgradient::CanvasGradient;
+use crate::dom::canvaspattern::CanvasPattern;
+use crate::dom::canvasrenderingcontext2d::CanvasRenderingContext2D;
+use crate::dom::dommatrix::DOMMatrix;
+use crate::dom::paintworkletglobalscope::PaintWorkletGlobalScope;
 use canvas_traits::canvas::CanvasImageData;
 use canvas_traits::canvas::CanvasMsg;
 use canvas_traits::canvas::FromLayoutMsg;
-use dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasFillRule;
-use dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasLineCap;
-use dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasLineJoin;
-use dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasRenderingContext2DMethods;
-use dom::bindings::codegen::Bindings::PaintRenderingContext2DBinding;
-use dom::bindings::codegen::Bindings::PaintRenderingContext2DBinding::PaintRenderingContext2DMethods;
-use dom::bindings::codegen::UnionTypes::HTMLImageElementOrHTMLCanvasElementOrCanvasRenderingContext2DOrCSSStyleValue;
-use dom::bindings::codegen::UnionTypes::StringOrCanvasGradientOrCanvasPattern;
-use dom::bindings::error::ErrorResult;
-use dom::bindings::error::Fallible;
-use dom::bindings::inheritance::Castable;
-use dom::bindings::js::Root;
-use dom::bindings::num::Finite;
-use dom::bindings::reflector::reflect_dom_object;
-use dom::bindings::str::DOMString;
-use dom::canvasgradient::CanvasGradient;
-use dom::canvaspattern::CanvasPattern;
-use dom::canvasrenderingcontext2d::CanvasRenderingContext2D;
-use dom::paintworkletglobalscope::PaintWorkletGlobalScope;
-use dom::workletglobalscope::WorkletGlobalScope;
 use dom_struct::dom_struct;
-use euclid::ScaleFactor;
-use euclid::Size2D;
-use euclid::TypedSize2D;
+use euclid::{Scale, Size2D};
 use ipc_channel::ipc::IpcSender;
 use servo_url::ServoUrl;
 use std::cell::Cell;
@@ -38,28 +35,30 @@ use style_traits::DevicePixel;
 #[dom_struct]
 pub struct PaintRenderingContext2D {
     context: CanvasRenderingContext2D,
-    device_pixel_ratio: Cell<ScaleFactor<f32, CSSPixel, DevicePixel>>,
+    device_pixel_ratio: Cell<Scale<f32, CSSPixel, DevicePixel>>,
 }
 
 impl PaintRenderingContext2D {
     fn new_inherited(global: &PaintWorkletGlobalScope) -> PaintRenderingContext2D {
         let size = Size2D::zero();
-        let image_cache = global.image_cache();
-        let base_url = global.upcast::<WorkletGlobalScope>().base_url();
         PaintRenderingContext2D {
-            context: CanvasRenderingContext2D::new_inherited(global.upcast(), None, image_cache, base_url, size),
-            device_pixel_ratio: Cell::new(ScaleFactor::new(1.0)),
+            context: CanvasRenderingContext2D::new_inherited(global.upcast(), None, size),
+            device_pixel_ratio: Cell::new(Scale::new(1.0)),
         }
     }
 
-    pub fn new(global: &PaintWorkletGlobalScope) -> Root<PaintRenderingContext2D> {
-        reflect_dom_object(box PaintRenderingContext2D::new_inherited(global),
-                           global,
-                           PaintRenderingContext2DBinding::Wrap)
+    pub fn new(global: &PaintWorkletGlobalScope) -> DomRoot<PaintRenderingContext2D> {
+        reflect_dom_object(
+            Box::new(PaintRenderingContext2D::new_inherited(global)),
+            global,
+        )
     }
 
     pub fn send_data(&self, sender: IpcSender<CanvasImageData>) {
-        let msg = CanvasMsg::FromLayout(FromLayoutMsg::SendData(sender));
+        let msg = CanvasMsg::FromLayout(
+            FromLayoutMsg::SendData(sender),
+            self.context.get_canvas_id(),
+        );
         let _ = self.context.get_ipc_renderer().send(msg);
     }
 
@@ -67,13 +66,15 @@ impl PaintRenderingContext2D {
         self.context.take_missing_image_urls()
     }
 
-    pub fn set_bitmap_dimensions(&self,
-                                 size: TypedSize2D<f32, CSSPixel>,
-                                 device_pixel_ratio: ScaleFactor<f32, CSSPixel, DevicePixel>)
-    {
+    pub fn set_bitmap_dimensions(
+        &self,
+        size: Size2D<f32, CSSPixel>,
+        device_pixel_ratio: Scale<f32, CSSPixel, DevicePixel>,
+    ) {
         let size = size * device_pixel_ratio;
         self.device_pixel_ratio.set(device_pixel_ratio);
-        self.context.set_bitmap_dimensions(size.to_untyped().to_i32());
+        self.context
+            .set_canvas_bitmap_dimensions(size.to_untyped().to_u64());
         self.scale_by_device_pixel_ratio();
     }
 
@@ -114,6 +115,11 @@ impl PaintRenderingContext2DMethods for PaintRenderingContext2D {
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-transform
     fn Transform(&self, a: f64, b: f64, c: f64, d: f64, e: f64, f: f64) {
         self.context.Transform(a, b, c, d, e, f)
+    }
+
+    // https://html.spec.whatwg.org/multipage/#dom-context-2d-gettransform
+    fn GetTransform(&self) -> DomRoot<DOMMatrix> {
+        self.context.GetTransform()
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-settransform
@@ -194,38 +200,37 @@ impl PaintRenderingContext2DMethods for PaintRenderingContext2D {
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-drawimage
-    fn DrawImage(&self,
-                 image: HTMLImageElementOrHTMLCanvasElementOrCanvasRenderingContext2DOrCSSStyleValue,
-                 dx: f64,
-                 dy: f64)
-                 -> ErrorResult {
+    fn DrawImage(&self, image: CanvasImageSource, dx: f64, dy: f64) -> ErrorResult {
         self.context.DrawImage(image, dx, dy)
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-drawimage
-    fn DrawImage_(&self,
-                  image: HTMLImageElementOrHTMLCanvasElementOrCanvasRenderingContext2DOrCSSStyleValue,
-                  dx: f64,
-                  dy: f64,
-                  dw: f64,
-                  dh: f64)
-                  -> ErrorResult {
+    fn DrawImage_(
+        &self,
+        image: CanvasImageSource,
+        dx: f64,
+        dy: f64,
+        dw: f64,
+        dh: f64,
+    ) -> ErrorResult {
         self.context.DrawImage_(image, dx, dy, dw, dh)
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-drawimage
-    fn DrawImage__(&self,
-                   image: HTMLImageElementOrHTMLCanvasElementOrCanvasRenderingContext2DOrCSSStyleValue,
-                   sx: f64,
-                   sy: f64,
-                   sw: f64,
-                   sh: f64,
-                   dx: f64,
-                   dy: f64,
-                   dw: f64,
-                   dh: f64)
-                   -> ErrorResult {
-        self.context.DrawImage__(image, sx, sy, sw, sh, dx, dy, dw, dh)
+    fn DrawImage__(
+        &self,
+        image: CanvasImageSource,
+        sx: f64,
+        sy: f64,
+        sw: f64,
+        sh: f64,
+        dx: f64,
+        dy: f64,
+        dw: f64,
+        dh: f64,
+    ) -> ErrorResult {
+        self.context
+            .DrawImage__(image, sx, sy, sw, sh, dx, dy, dw, dh)
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-moveto
@@ -264,8 +269,19 @@ impl PaintRenderingContext2DMethods for PaintRenderingContext2D {
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-ellipse
-    fn Ellipse(&self, x: f64, y: f64, rx: f64, ry: f64, rotation: f64, start: f64, end: f64, ccw: bool) -> ErrorResult {
-        self.context.Ellipse(x, y, rx, ry, rotation, start, end, ccw)
+    fn Ellipse(
+        &self,
+        x: f64,
+        y: f64,
+        rx: f64,
+        ry: f64,
+        rotation: f64,
+        start: f64,
+        end: f64,
+        ccw: bool,
+    ) -> ErrorResult {
+        self.context
+            .Ellipse(x, y, rx, ry, rotation, start, end, ccw)
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-imagesmoothingenabled
@@ -299,32 +315,35 @@ impl PaintRenderingContext2DMethods for PaintRenderingContext2D {
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-createlineargradient
-    fn CreateLinearGradient(&self,
-                            x0: Finite<f64>,
-                            y0: Finite<f64>,
-                            x1: Finite<f64>,
-                            y1: Finite<f64>)
-                            -> Root<CanvasGradient> {
+    fn CreateLinearGradient(
+        &self,
+        x0: Finite<f64>,
+        y0: Finite<f64>,
+        x1: Finite<f64>,
+        y1: Finite<f64>,
+    ) -> DomRoot<CanvasGradient> {
         self.context.CreateLinearGradient(x0, y0, x1, y1)
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-createradialgradient
-    fn CreateRadialGradient(&self,
-                            x0: Finite<f64>,
-                            y0: Finite<f64>,
-                            r0: Finite<f64>,
-                            x1: Finite<f64>,
-                            y1: Finite<f64>,
-                            r1: Finite<f64>)
-                            -> Fallible<Root<CanvasGradient>> {
+    fn CreateRadialGradient(
+        &self,
+        x0: Finite<f64>,
+        y0: Finite<f64>,
+        r0: Finite<f64>,
+        x1: Finite<f64>,
+        y1: Finite<f64>,
+        r1: Finite<f64>,
+    ) -> Fallible<DomRoot<CanvasGradient>> {
         self.context.CreateRadialGradient(x0, y0, r0, x1, y1, r1)
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-context-2d-createpattern
-    fn CreatePattern(&self,
-                     image: HTMLImageElementOrHTMLCanvasElementOrCanvasRenderingContext2DOrCSSStyleValue,
-                     repetition: DOMString)
-                     -> Fallible<Root<CanvasPattern>> {
+    fn CreatePattern(
+        &self,
+        image: CanvasImageSource,
+        repetition: DOMString,
+    ) -> Fallible<Option<DomRoot<CanvasPattern>>> {
         self.context.CreatePattern(image, repetition)
     }
 
@@ -407,5 +426,4 @@ impl PaintRenderingContext2DMethods for PaintRenderingContext2D {
     fn SetShadowColor(&self, value: DOMString) {
         self.context.SetShadowColor(value)
     }
-
 }

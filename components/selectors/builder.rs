@@ -1,6 +1,6 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! Helper module to build up a selector safely and efficiently.
 //!
@@ -17,13 +17,12 @@
 //! is non-trivial. This module encapsulates those details and presents an
 //! easy-to-use API for the parser.
 
-use parser::{Combinator, Component, SelectorImpl};
+use crate::parser::{Combinator, Component, SelectorImpl};
+use crate::sink::Push;
 use servo_arc::{Arc, HeaderWithLength, ThinArc};
-use sink::Push;
 use smallvec::{self, SmallVec};
 use std::cmp;
 use std::iter;
-use std::ops::Add;
 use std::ptr;
 use std::slice;
 
@@ -36,6 +35,7 @@ use std::slice;
 /// (from left to right). Once the process is complete, callers should invoke
 /// build(), which transforms the contents of the SelectorBuilder into a heap-
 /// allocated Selector and leaves the builder in a drained state.
+#[derive(Debug)]
 pub struct SelectorBuilder<Impl: SelectorImpl> {
     /// The entire sequence of simple selectors, from left to right, without combinators.
     ///
@@ -71,7 +71,7 @@ impl<Impl: SelectorImpl> SelectorBuilder<Impl> {
     /// Pushes a simple selector onto the current compound selector.
     #[inline(always)]
     pub fn push_simple_selector(&mut self, ss: Component<Impl>) {
-        debug_assert!(!ss.is_combinator());
+        assert!(!ss.is_combinator());
         self.simple_selectors.push(ss);
         self.current_len += 1;
     }
@@ -84,12 +84,6 @@ impl<Impl: SelectorImpl> SelectorBuilder<Impl> {
         self.current_len = 0;
     }
 
-    /// Returns true if no simple selectors have ever been pushed to this builder.
-    #[inline(always)]
-    pub fn is_empty(&self) -> bool {
-        self.simple_selectors.is_empty()
-    }
-
     /// Returns true if combinators have ever been pushed to this builder.
     #[inline(always)]
     pub fn has_combinators(&self) -> bool {
@@ -98,22 +92,34 @@ impl<Impl: SelectorImpl> SelectorBuilder<Impl> {
 
     /// Consumes the builder, producing a Selector.
     #[inline(always)]
-    pub fn build(&mut self, parsed_pseudo: bool) -> ThinArc<SpecificityAndFlags, Component<Impl>> {
+    pub fn build(
+        &mut self,
+        parsed_pseudo: bool,
+        parsed_slotted: bool,
+        parsed_part: bool,
+    ) -> ThinArc<SpecificityAndFlags, Component<Impl>> {
         // Compute the specificity and flags.
-        let mut spec = SpecificityAndFlags(specificity(self.simple_selectors.iter()));
+        let specificity = specificity(self.simple_selectors.iter());
+        let mut flags = SelectorFlags::empty();
         if parsed_pseudo {
-            spec.0 |= HAS_PSEUDO_BIT;
+            flags |= SelectorFlags::HAS_PSEUDO;
         }
-
-        self.build_with_specificity_and_flags(spec)
+        if parsed_slotted {
+            flags |= SelectorFlags::HAS_SLOTTED;
+        }
+        if parsed_part {
+            flags |= SelectorFlags::HAS_PART;
+        }
+        self.build_with_specificity_and_flags(SpecificityAndFlags { specificity, flags })
     }
-
 
     /// Builds with an explicit SpecificityAndFlags. This is separated from build() so
     /// that unit tests can pass an explicit specificity.
     #[inline(always)]
-    pub fn build_with_specificity_and_flags(&mut self, spec: SpecificityAndFlags)
-                                            -> ThinArc<SpecificityAndFlags, Component<Impl>> {
+    pub fn build_with_specificity_and_flags(
+        &mut self,
+        spec: SpecificityAndFlags,
+    ) -> ThinArc<SpecificityAndFlags, Component<Impl>> {
         // First, compute the total number of Components we'll need to allocate
         // space for.
         let full_len = self.simple_selectors.len() + self.combinators.len();
@@ -136,7 +142,7 @@ impl<Impl: SelectorImpl> SelectorBuilder<Impl> {
         let iter = SelectorBuilderIter {
             current_simple_selectors: current.iter(),
             rest_of_simple_selectors: rest,
-            combinators: self.combinators.drain().rev(),
+            combinators: self.combinators.drain(..).rev(),
         };
 
         Arc::into_thin(Arc::from_header_and_iter(header, iter))
@@ -146,14 +152,14 @@ impl<Impl: SelectorImpl> SelectorBuilder<Impl> {
 struct SelectorBuilderIter<'a, Impl: SelectorImpl> {
     current_simple_selectors: slice::Iter<'a, Component<Impl>>,
     rest_of_simple_selectors: &'a [Component<Impl>],
-    combinators: iter::Rev<smallvec::Drain<'a, (Combinator, usize)>>,
+    combinators: iter::Rev<smallvec::Drain<'a, [(Combinator, usize); 16]>>,
 }
 
 impl<'a, Impl: SelectorImpl> ExactSizeIterator for SelectorBuilderIter<'a, Impl> {
     fn len(&self) -> usize {
         self.current_simple_selectors.len() +
-        self.rest_of_simple_selectors.len() +
-        self.combinators.len()
+            self.rest_of_simple_selectors.len() +
+            self.combinators.len()
     }
 }
 
@@ -165,9 +171,7 @@ impl<'a, Impl: SelectorImpl> Iterator for SelectorBuilderIter<'a, Impl> {
             // Move a simple selector out of this slice iterator.
             // This is safe because we’ve called SmallVec::set_len(0) above,
             // so SmallVec::drop won’t drop this simple selector.
-            unsafe {
-                Some(ptr::read(simple_selector_ref))
-            }
+            unsafe { Some(ptr::read(simple_selector_ref)) }
         } else {
             self.combinators.next().map(|(combinator, len)| {
                 let (rest, current) = split_from_end(self.rest_of_simple_selectors, len);
@@ -187,55 +191,58 @@ fn split_from_end<T>(s: &[T], at: usize) -> (&[T], &[T]) {
     s.split_at(s.len() - at)
 }
 
-pub const HAS_PSEUDO_BIT: u32 = 1 << 30;
+bitflags! {
+    /// Flags that indicate at which point of parsing a selector are we.
+    #[derive(Default, ToShmem)]
+    pub (crate) struct SelectorFlags : u8 {
+        const HAS_PSEUDO = 1 << 0;
+        const HAS_SLOTTED = 1 << 1;
+        const HAS_PART = 1 << 2;
+    }
+}
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SpecificityAndFlags(pub u32);
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ToShmem)]
+pub struct SpecificityAndFlags {
+    /// There are two free bits here, since we use ten bits for each specificity
+    /// kind (id, class, element).
+    pub(crate) specificity: u32,
+    /// There's padding after this field due to the size of the flags.
+    pub(crate) flags: SelectorFlags,
+}
 
 impl SpecificityAndFlags {
+    #[inline]
     pub fn specificity(&self) -> u32 {
-        self.0 & !HAS_PSEUDO_BIT
+        self.specificity
     }
 
+    #[inline]
     pub fn has_pseudo_element(&self) -> bool {
-        (self.0 & HAS_PSEUDO_BIT) != 0
+        self.flags.intersects(SelectorFlags::HAS_PSEUDO)
+    }
+
+    #[inline]
+    pub fn is_slotted(&self) -> bool {
+        self.flags.intersects(SelectorFlags::HAS_SLOTTED)
+    }
+
+    #[inline]
+    pub fn is_part(&self) -> bool {
+        self.flags.intersects(SelectorFlags::HAS_PART)
     }
 }
 
 const MAX_10BIT: u32 = (1u32 << 10) - 1;
 
-#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Add, AddAssign, Clone, Copy, Default, Eq, Ord, PartialEq, PartialOrd)]
 struct Specificity {
     id_selectors: u32,
     class_like_selectors: u32,
     element_selectors: u32,
 }
 
-impl Add for Specificity {
-    type Output = Specificity;
-
-    fn add(self, rhs: Specificity) -> Specificity {
-        Specificity {
-            id_selectors: self.id_selectors + rhs.id_selectors,
-            class_like_selectors:
-                self.class_like_selectors + rhs.class_like_selectors,
-            element_selectors:
-                self.element_selectors + rhs.element_selectors,
-        }
-    }
-}
-
-impl Default for Specificity {
-    fn default() -> Specificity {
-        Specificity {
-            id_selectors: 0,
-            class_like_selectors: 0,
-            element_selectors: 0,
-        }
-    }
-}
-
 impl From<u32> for Specificity {
+    #[inline]
     fn from(value: u32) -> Specificity {
         assert!(value <= MAX_10BIT << 20 | MAX_10BIT << 10 | MAX_10BIT);
         Specificity {
@@ -247,70 +254,103 @@ impl From<u32> for Specificity {
 }
 
 impl From<Specificity> for u32 {
+    #[inline]
     fn from(specificity: Specificity) -> u32 {
-        cmp::min(specificity.id_selectors, MAX_10BIT) << 20
-        | cmp::min(specificity.class_like_selectors, MAX_10BIT) << 10
-        | cmp::min(specificity.element_selectors, MAX_10BIT)
+        cmp::min(specificity.id_selectors, MAX_10BIT) << 20 |
+            cmp::min(specificity.class_like_selectors, MAX_10BIT) << 10 |
+            cmp::min(specificity.element_selectors, MAX_10BIT)
     }
 }
 
 fn specificity<Impl>(iter: slice::Iter<Component<Impl>>) -> u32
-    where Impl: SelectorImpl
+where
+    Impl: SelectorImpl,
 {
     complex_selector_specificity(iter).into()
 }
 
-fn complex_selector_specificity<Impl>(mut iter: slice::Iter<Component<Impl>>)
-                                      -> Specificity
-    where Impl: SelectorImpl
+fn complex_selector_specificity<Impl>(iter: slice::Iter<Component<Impl>>) -> Specificity
+where
+    Impl: SelectorImpl,
 {
-    fn simple_selector_specificity<Impl>(simple_selector: &Component<Impl>,
-                                         specificity: &mut Specificity)
-        where Impl: SelectorImpl
+    fn simple_selector_specificity<Impl>(
+        simple_selector: &Component<Impl>,
+        specificity: &mut Specificity,
+    ) where
+        Impl: SelectorImpl,
     {
         match *simple_selector {
-            Component::Combinator(..) => unreachable!(),
-            Component::PseudoElement(..) |
-            Component::LocalName(..) => {
+            Component::Combinator(..) => {
+                unreachable!("Found combinator in simple selectors vector?");
+            },
+            Component::Part(..) | Component::PseudoElement(..) | Component::LocalName(..) => {
                 specificity.element_selectors += 1
-            }
+            },
+            Component::Slotted(ref selector) => {
+                specificity.element_selectors += 1;
+                // Note that due to the way ::slotted works we only compete with
+                // other ::slotted rules, so the above rule doesn't really
+                // matter, but we do it still for consistency with other
+                // pseudo-elements.
+                //
+                // See: https://github.com/w3c/csswg-drafts/issues/1915
+                *specificity += Specificity::from(selector.specificity());
+            },
+            Component::Host(ref selector) => {
+                specificity.class_like_selectors += 1;
+                if let Some(ref selector) = *selector {
+                    // See: https://github.com/w3c/csswg-drafts/issues/1915
+                    *specificity += Specificity::from(selector.specificity());
+                }
+            },
             Component::ID(..) => {
-                specificity.id_selectors += 1
-            }
+                specificity.id_selectors += 1;
+            },
             Component::Class(..) |
             Component::AttributeInNoNamespace { .. } |
             Component::AttributeInNoNamespaceExists { .. } |
             Component::AttributeOther(..) |
-
-            Component::FirstChild | Component::LastChild |
-            Component::OnlyChild | Component::Root |
+            Component::FirstChild |
+            Component::LastChild |
+            Component::OnlyChild |
+            Component::Root |
             Component::Empty |
+            Component::Scope |
             Component::NthChild(..) |
             Component::NthLastChild(..) |
             Component::NthOfType(..) |
             Component::NthLastOfType(..) |
-            Component::FirstOfType | Component::LastOfType |
+            Component::FirstOfType |
+            Component::LastOfType |
             Component::OnlyOfType |
             Component::NonTSPseudoClass(..) => {
-                specificity.class_like_selectors += 1
-            }
+                specificity.class_like_selectors += 1;
+            },
+            Component::Negation(ref list) | Component::Is(ref list) => {
+                // https://drafts.csswg.org/selectors/#specificity-rules:
+                //
+                //     The specificity of an :is() pseudo-class is replaced by the
+                //     specificity of the most specific complex selector in its
+                //     selector list argument.
+                let mut max = 0;
+                for selector in &**list {
+                    max = std::cmp::max(selector.specificity(), max);
+                }
+                *specificity += Specificity::from(max);
+            },
+            Component::Where(..) |
             Component::ExplicitUniversalType |
             Component::ExplicitAnyNamespace |
             Component::ExplicitNoNamespace |
             Component::DefaultNamespace(..) |
             Component::Namespace(..) => {
                 // Does not affect specificity
-            }
-            Component::Negation(ref negated) => {
-                for ss in negated.iter() {
-                    simple_selector_specificity(&ss, specificity);
-                }
-            }
+            },
         }
     }
 
     let mut specificity = Default::default();
-    for simple_selector in &mut iter {
+    for simple_selector in iter {
         simple_selector_specificity(&simple_selector, &mut specificity);
     }
     specificity

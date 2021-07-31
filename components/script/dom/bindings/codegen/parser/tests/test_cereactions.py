@@ -38,7 +38,7 @@ def WebIDLTest(parser, harness):
         """)
 
         results = parser.finish()
-    except Exception, e:
+    except Exception as e:
         harness.ok(False, "Shouldn't have thrown for [CEReactions] used on writable attribute. %s" % e)
         threw = True
 
@@ -52,7 +52,7 @@ def WebIDLTest(parser, harness):
         """)
 
         results = parser.finish()
-    except Exception, e:
+    except Exception as e:
         harness.ok(False, "Shouldn't have thrown for [CEReactions] used on regular operations. %s" % e)
         threw = True
 
@@ -106,21 +106,6 @@ def WebIDLTest(parser, harness):
     try:
         parser.parse("""
           interface Foo {
-            [CEReactions] creator boolean (DOMString name, boolean value);
-          };
-        """)
-        results = parser.finish()
-    except:
-        threw = True
-
-    harness.ok(threw,
-               "Should have thrown for [CEReactions] used on a named creator")
-
-    parser = parser.reset()
-    threw = False
-    try:
-        parser.parse("""
-          interface Foo {
             [CEReactions] legacycaller double compute(double x);
           };
         """)
@@ -146,17 +131,3 @@ def WebIDLTest(parser, harness):
     harness.ok(threw,
                "Should have thrown for [CEReactions] used on a stringifier")
 
-    parser = parser.reset()
-    threw = False
-    try:
-        parser.parse("""
-            interface Foo {
-              [CEReactions] jsonifier;
-            };
-        """)
-
-        results = parser.finish()
-    except:
-        threw = True
-
-    harness.ok(threw, "Should have thrown for [CEReactions] used on a jsonifier")

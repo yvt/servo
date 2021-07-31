@@ -1,10 +1,12 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // https://html.spec.whatwg.org/multipage/#htmlselectelement
-[HTMLConstructor]
+[Exposed=Window]
 interface HTMLSelectElement : HTMLElement {
+  [HTMLConstructor] constructor();
+
   // [CEReactions]
   //          attribute boolean autofocus;
   [CEReactions]
@@ -14,8 +16,8 @@ interface HTMLSelectElement : HTMLElement {
            attribute boolean multiple;
   [CEReactions]
            attribute DOMString name;
-  // [CEReactions]
-  //          attribute boolean required;
+  [CEReactions]
+           attribute boolean required;
   [CEReactions]
            attribute unsigned long size;
 
@@ -26,26 +28,25 @@ interface HTMLSelectElement : HTMLElement {
            attribute unsigned long length;
   getter Element? item(unsigned long index);
   HTMLOptionElement? namedItem(DOMString name);
-  // Note: this function currently only exists for union.html.
-  [CEReactions]
+
+  [CEReactions, Throws]
   void add((HTMLOptionElement or HTMLOptGroupElement) element, optional (HTMLElement or long)? before = null);
   [CEReactions]
   void remove(); // ChildNode overload
   [CEReactions]
   void remove(long index);
-  // [CEReactions]
-  // setter void (unsigned long index, HTMLOptionElement? option);
+  [CEReactions, Throws] setter void (unsigned long index, HTMLOptionElement? option);
 
   // readonly attribute HTMLCollection selectedOptions;
   attribute long selectedIndex;
   attribute DOMString value;
 
-  // readonly attribute boolean willValidate;
+  readonly attribute boolean willValidate;
   readonly attribute ValidityState validity;
-  // readonly attribute DOMString validationMessage;
-  // boolean checkValidity();
-  // boolean reportValidity();
-  // void setCustomValidity(DOMString error);
+  readonly attribute DOMString validationMessage;
+  boolean checkValidity();
+  boolean reportValidity();
+  void setCustomValidity(DOMString error);
 
   readonly attribute NodeList labels;
 };

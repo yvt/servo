@@ -1,14 +1,14 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use dom::bindings::codegen::Bindings::PerformanceEntryBinding;
-use dom::bindings::codegen::Bindings::PerformanceEntryBinding::PerformanceEntryMethods;
-use dom::bindings::js::Root;
-use dom::bindings::num::Finite;
-use dom::bindings::reflector::{Reflector, reflect_dom_object};
-use dom::bindings::str::DOMString;
-use dom::globalscope::GlobalScope;
+use crate::dom::bindings::codegen::Bindings::PerformanceBinding::DOMHighResTimeStamp;
+use crate::dom::bindings::codegen::Bindings::PerformanceEntryBinding::PerformanceEntryMethods;
+use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
+use crate::dom::bindings::root::DomRoot;
+use crate::dom::bindings::str::DOMString;
+use crate::dom::globalscope::GlobalScope;
+use crate::dom::performance::reduce_timing_resolution;
 use dom_struct::dom_struct;
 
 #[dom_struct]
@@ -21,10 +21,12 @@ pub struct PerformanceEntry {
 }
 
 impl PerformanceEntry {
-    pub fn new_inherited(name: DOMString,
-                         entry_type: DOMString,
-                         start_time: f64,
-                         duration: f64) -> PerformanceEntry {
+    pub fn new_inherited(
+        name: DOMString,
+        entry_type: DOMString,
+        start_time: f64,
+        duration: f64,
+    ) -> PerformanceEntry {
         PerformanceEntry {
             reflector_: Reflector::new(),
             name,
@@ -35,13 +37,15 @@ impl PerformanceEntry {
     }
 
     #[allow(unrooted_must_root)]
-    pub fn new(global: &GlobalScope,
-               name: DOMString,
-               entry_type: DOMString,
-               start_time: f64,
-               duration: f64) -> Root<PerformanceEntry> {
+    pub fn new(
+        global: &GlobalScope,
+        name: DOMString,
+        entry_type: DOMString,
+        start_time: f64,
+        duration: f64,
+    ) -> DomRoot<PerformanceEntry> {
         let entry = PerformanceEntry::new_inherited(name, entry_type, start_time, duration);
-        reflect_dom_object(box entry, global, PerformanceEntryBinding::Wrap)
+        reflect_dom_object(Box::new(entry), global)
     }
 
     pub fn entry_type(&self) -> &DOMString {
@@ -54,6 +58,10 @@ impl PerformanceEntry {
 
     pub fn start_time(&self) -> f64 {
         self.start_time
+    }
+
+    pub fn duration(&self) -> f64 {
+        self.duration
     }
 }
 
@@ -69,12 +77,12 @@ impl PerformanceEntryMethods for PerformanceEntry {
     }
 
     // https://w3c.github.io/performance-timeline/#dom-performanceentry-starttime
-    fn StartTime(&self) -> Finite<f64> {
-        Finite::wrap(self.start_time)
+    fn StartTime(&self) -> DOMHighResTimeStamp {
+        reduce_timing_resolution(self.start_time)
     }
 
     // https://w3c.github.io/performance-timeline/#dom-performanceentry-duration
-    fn Duration(&self) -> Finite<f64> {
-        Finite::wrap(self.duration)
+    fn Duration(&self) -> DOMHighResTimeStamp {
+        reduce_timing_resolution(self.duration)
     }
 }

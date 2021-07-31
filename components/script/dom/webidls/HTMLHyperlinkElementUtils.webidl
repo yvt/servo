@@ -1,14 +1,11 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // https://html.spec.whatwg.org/multipage/#htmlhyperlinkelementutils
-[NoInterfaceObject]
-interface HTMLHyperlinkElementUtils {
-  // [CEReactions]
-  // stringifier attribute USVString href;
+interface mixin HTMLHyperlinkElementUtils {
   [CEReactions]
-           attribute USVString href;
+  stringifier attribute USVString href;
   readonly attribute USVString origin;
   [CEReactions]
            attribute USVString protocol;
@@ -28,9 +25,4 @@ interface HTMLHyperlinkElementUtils {
            attribute USVString search;
   [CEReactions]
            attribute USVString hash;
-
-  // Adding a separate stringifier method until
-  // https://github.com/servo/servo/issues/7590 adds attribute stringifier
-  // support.
-  stringifier;
 };

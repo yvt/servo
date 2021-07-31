@@ -1,37 +1,33 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! Generic types for CSS values related to flexbox.
 
-use values::computed::Percentage;
-
 /// A generic value for the `flex-basis` property.
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
-#[derive(Clone, Copy, Debug, PartialEq, ToComputedValue, ToCss)]
-pub enum FlexBasis<LengthOrPercentage> {
-    /// `auto`
-    Auto,
+#[derive(
+    Animate,
+    Clone,
+    ComputeSquaredDistance,
+    Copy,
+    Debug,
+    MallocSizeOf,
+    Parse,
+    PartialEq,
+    SpecifiedValueInfo,
+    ToAnimatedValue,
+    ToAnimatedZero,
+    ToComputedValue,
+    ToCss,
+    ToResolvedValue,
+    ToShmem,
+)]
+#[repr(C)]
+pub enum GenericFlexBasis<S> {
     /// `content`
     Content,
-    /// `<length-percentage>`
-    Length(LengthOrPercentage),
+    /// `<width>`
+    Size(S),
 }
 
-impl<L> FlexBasis<L> {
-    /// Returns `auto`.
-    #[inline]
-    pub fn auto() -> Self {
-        FlexBasis::Auto
-    }
-}
-
-impl<L> FlexBasis<L>
-where Percentage: Into<L>,
-{
-    /// Returns `0%`.
-    #[inline]
-    pub fn zero_percent() -> Self {
-        FlexBasis::Length(Percentage(0.).into())
-    }
-}
+pub use self::GenericFlexBasis as FlexBasis;

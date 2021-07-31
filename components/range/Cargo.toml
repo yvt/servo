@@ -1,9 +1,9 @@
 [package]
-
 name = "range"
 version = "0.0.1"
 authors = ["The Servo Project Developers"]
 license = "MPL-2.0"
+edition = "2018"
 publish = false
 
 [lib]
@@ -11,7 +11,7 @@ name = "range"
 path = "lib.rs"
 
 [dependencies]
-heapsize = "0.4"
-heapsize_derive = "0.1"
-num-traits = "0.1.32"
+malloc_size_of = { path = "../malloc_size_of" }
+malloc_size_of_derive = "0.1"
+num-traits = "0.2"
 serde = "1.0"

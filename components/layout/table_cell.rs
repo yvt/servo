@@ -1,35 +1,37 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! CSS table formatting contexts.
 
-#![deny(unsafe_code)]
-
+use crate::block::{BlockFlow, ISizeAndMarginsComputer, MarginsMayCollapseFlag};
+use crate::context::LayoutContext;
+use crate::display_list::{
+    DisplayListBuildState, StackingContextCollectionFlags, StackingContextCollectionState,
+};
+use crate::flow::{Flow, FlowClass, FlowFlags, GetBaseFlow, OpaqueFlow};
+use crate::fragment::{Fragment, FragmentBorderBoxIterator, Overflow};
+use crate::layout_debug;
+use crate::table::InternalTable;
+use crate::table_row::{CollapsedBorder, CollapsedBorderProvenance};
 use app_units::Au;
-use block::{BlockFlow, ISizeAndMarginsComputer, MarginsMayCollapseFlag};
-use context::LayoutContext;
-use display_list_builder::{BlockFlowDisplayListBuilding, BorderPaintingMode};
-use display_list_builder::{DisplayListBuildState, StackingContextCollectionFlags};
-use display_list_builder::StackingContextCollectionState;
-use euclid::{Point2D, Rect, SideOffsets2D, Size2D};
-use flow::{self, Flow, FlowClass, IS_ABSOLUTELY_POSITIONED, OpaqueFlow};
-use fragment::{Fragment, FragmentBorderBoxIterator, Overflow};
+use euclid::default::{Point2D, Rect, SideOffsets2D, Size2D};
 use gfx_traits::print_tree::PrintTree;
-use layout_debug;
-use model::MaybeAuto;
 use script_layout_interface::wrapper_traits::ThreadSafeLayoutNode;
 use std::fmt;
-use style::computed_values::{border_collapse, border_top_style};
 use style::logical_geometry::{LogicalMargin, LogicalRect, LogicalSize, WritingMode};
 use style::properties::ComputedValues;
+use style::values::computed::length::Size;
 use style::values::computed::Color;
-use style::values::generics::box_::VerticalAlign;
-use table::InternalTable;
-use table_row::{CollapsedBorder, CollapsedBorderProvenance};
+use style::values::generics::box_::{VerticalAlign, VerticalAlignKeyword};
+use style::values::specified::BorderStyle;
+
+#[allow(unsafe_code)]
+unsafe impl crate::flow::HasBaseFlow for TableCellFlow {}
 
 /// A table formatting context.
 #[derive(Serialize)]
+#[repr(C)]
 pub struct TableCellFlow {
     /// Data common to all block flows.
     pub block_flow: BlockFlow,
@@ -59,8 +61,11 @@ impl TableCellFlow {
         }
     }
 
-    pub fn from_node_fragment_and_visibility_flag<N: ThreadSafeLayoutNode>(
-            node: &N, fragment: Fragment, visible: bool) -> TableCellFlow {
+    pub fn from_node_fragment_and_visibility_flag<'dom>(
+        node: &impl ThreadSafeLayoutNode<'dom>,
+        fragment: Fragment,
+        visible: bool,
+    ) -> TableCellFlow {
         TableCellFlow {
             block_flow: BlockFlow::from_fragment(fragment),
             collapsed_borders: CollapsedBordersForCell::new(),
@@ -87,7 +92,8 @@ impl TableCellFlow {
         let remaining = self.block_flow.assign_block_size_block_base(
             layout_context,
             None,
-            MarginsMayCollapseFlag::MarginsMayNotCollapse);
+            MarginsMayCollapseFlag::MarginsMayNotCollapse,
+        );
         debug_assert!(remaining.is_none());
     }
 
@@ -96,15 +102,20 @@ impl TableCellFlow {
         // Note to the reader: this code has been tested with negative margins.
         // We end up with a "end" that's before the "start," but the math still works out.
         let mut extents = None;
-        for kid in flow::base(self).children.iter() {
-            let kid_base = flow::base(kid);
-            if kid_base.flags.contains(IS_ABSOLUTELY_POSITIONED) {
-                continue
+        for kid in self.base().children.iter() {
+            let kid_base = kid.base();
+            if kid_base.flags.contains(FlowFlags::IS_ABSOLUTELY_POSITIONED) {
+                continue;
             }
             let start = kid_base.position.start.b -
-                kid_base.collapsible_margins.block_start_margin_for_noncollapsible_context();
-            let end = kid_base.position.start.b + kid_base.position.size.block +
-                kid_base.collapsible_margins.block_end_margin_for_noncollapsible_context();
+                kid_base
+                    .collapsible_margins
+                    .block_start_margin_for_noncollapsible_context();
+            let end = kid_base.position.start.b +
+                kid_base.position.size.block +
+                kid_base
+                    .collapsible_margins
+                    .block_end_margin_for_noncollapsible_context();
             match extents {
                 Some((ref mut first_start, ref mut last_end)) => {
                     if start < *first_start {
@@ -113,7 +124,7 @@ impl TableCellFlow {
                     if end > *last_end {
                         *last_end = end
                     }
-                }
+                },
                 None => extents = Some((start, end)),
             }
         }
@@ -123,27 +134,41 @@ impl TableCellFlow {
         };
 
         let kids_size = last_end - first_start;
-        let self_size = flow::base(self).position.size.block -
+        let self_size = self.base().position.size.block -
             self.block_flow.fragment.border_padding.block_start_end();
         let kids_self_gap = self_size - kids_size;
 
-        // This offset should also account for VerticalAlign::Baseline.
+        // This offset should also account for VerticalAlign::baseline.
         // Need max cell ascent from the first row of this cell.
         let offset = match self.block_flow.fragment.style().get_box().vertical_align {
-            VerticalAlign::Middle => kids_self_gap / 2,
-            VerticalAlign::Bottom => kids_self_gap,
+            VerticalAlign::Keyword(VerticalAlignKeyword::Middle) => kids_self_gap / 2,
+            VerticalAlign::Keyword(VerticalAlignKeyword::Bottom) => kids_self_gap,
             _ => Au(0),
         };
         if offset == Au(0) {
-            return
+            return;
         }
 
-        for kid in flow::mut_base(self).children.iter_mut() {
-            let kid_base = flow::mut_base(kid);
-            if !kid_base.flags.contains(IS_ABSOLUTELY_POSITIONED) {
+        for kid in self.mut_base().children.iter_mut() {
+            let kid_base = kid.mut_base();
+            if !kid_base.flags.contains(FlowFlags::IS_ABSOLUTELY_POSITIONED) {
                 kid_base.position.start.b += offset
             }
         }
+    }
+
+    // Total block size of child
+    //
+    // Call after block size calculation
+    pub fn total_block_size(&mut self) -> Au {
+        // TODO: Percentage block-size
+        let specified = self
+            .fragment()
+            .style()
+            .content_block_size()
+            .to_used_value(Au(0))
+            .unwrap_or(Au(0));
+        specified + self.fragment().border_padding.block_start_end()
     }
 }
 
@@ -171,23 +196,47 @@ impl Flow for TableCellFlow {
     /// Minimum/preferred inline-sizes set by this function are used in automatic table layout
     /// calculation.
     fn bubble_inline_sizes(&mut self) {
-        let _scope = layout_debug_scope!("table_cell::bubble_inline_sizes {:x}",
-                                         self.block_flow.base.debug_id());
+        let _scope = layout_debug_scope!(
+            "table_cell::bubble_inline_sizes {:x}",
+            self.block_flow.base.debug_id()
+        );
 
         self.block_flow.bubble_inline_sizes_for_block(true);
-        let specified_inline_size = MaybeAuto::from_style(self.block_flow
-                                                              .fragment
-                                                              .style()
-                                                              .content_inline_size(),
-                                                          Au(0)).specified_or_zero();
-        if self.block_flow.base.intrinsic_inline_sizes.minimum_inline_size <
-                specified_inline_size {
-            self.block_flow.base.intrinsic_inline_sizes.minimum_inline_size = specified_inline_size
+        let specified_inline_size = match self.block_flow.fragment.style().content_inline_size() {
+            Size::Auto => Au(0),
+            Size::LengthPercentage(ref lp) => lp.to_used_value(Au(0)),
+        };
+
+        if self
+            .block_flow
+            .base
+            .intrinsic_inline_sizes
+            .minimum_inline_size <
+            specified_inline_size
+        {
+            self.block_flow
+                .base
+                .intrinsic_inline_sizes
+                .minimum_inline_size = specified_inline_size
         }
-        if self.block_flow.base.intrinsic_inline_sizes.preferred_inline_size <
-                self.block_flow.base.intrinsic_inline_sizes.minimum_inline_size {
-            self.block_flow.base.intrinsic_inline_sizes.preferred_inline_size =
-                self.block_flow.base.intrinsic_inline_sizes.minimum_inline_size;
+        if self
+            .block_flow
+            .base
+            .intrinsic_inline_sizes
+            .preferred_inline_size <
+            self.block_flow
+                .base
+                .intrinsic_inline_sizes
+                .minimum_inline_size
+        {
+            self.block_flow
+                .base
+                .intrinsic_inline_sizes
+                .preferred_inline_size = self
+                .block_flow
+                .base
+                .intrinsic_inline_sizes
+                .minimum_inline_size;
         }
     }
 
@@ -195,37 +244,42 @@ impl Flow for TableCellFlow {
     /// When called on this context, the context has had its inline-size set by the parent table
     /// row.
     fn assign_inline_sizes(&mut self, layout_context: &LayoutContext) {
-        let _scope = layout_debug_scope!("table_cell::assign_inline_sizes {:x}",
-                                            self.block_flow.base.debug_id());
-        debug!("assign_inline_sizes({}): assigning inline_size for flow", "table_cell");
+        let _scope = layout_debug_scope!(
+            "table_cell::assign_inline_sizes {:x}",
+            self.block_flow.base.debug_id()
+        );
+        debug!(
+            "assign_inline_sizes({}): assigning inline_size for flow",
+            "table_cell"
+        );
 
         let shared_context = layout_context.shared_context();
         // The position was set to the column inline-size by the parent flow, table row flow.
         let containing_block_inline_size = self.block_flow.base.block_container_inline_size;
 
-        let inline_size_computer = InternalTable {
-            border_collapse: self.block_flow.fragment.style.get_inheritedtable().border_collapse,
-        };
-        inline_size_computer.compute_used_inline_size(&mut self.block_flow,
-                                                      shared_context,
-                                                      containing_block_inline_size);
+        let inline_size_computer = InternalTable;
+        inline_size_computer.compute_used_inline_size(
+            &mut self.block_flow,
+            shared_context,
+            containing_block_inline_size,
+        );
 
-        let inline_start_content_edge =
-            self.block_flow.fragment.border_box.start.i +
+        let inline_start_content_edge = self.block_flow.fragment.border_box.start.i +
             self.block_flow.fragment.border_padding.inline_start;
-        let inline_end_content_edge =
-            self.block_flow.base.block_container_inline_size -
+        let inline_end_content_edge = self.block_flow.base.block_container_inline_size -
             self.block_flow.fragment.border_padding.inline_start_end() -
             self.block_flow.fragment.border_box.size.inline;
         let padding_and_borders = self.block_flow.fragment.border_padding.inline_start_end();
         let content_inline_size =
             self.block_flow.fragment.border_box.size.inline - padding_and_borders;
 
-        self.block_flow.propagate_assigned_inline_size_to_children(shared_context,
-                                                                   inline_start_content_edge,
-                                                                   inline_end_content_edge,
-                                                                   content_inline_size,
-                                                                   |_, _, _, _, _, _| {});
+        self.block_flow.propagate_assigned_inline_size_to_children(
+            shared_context,
+            inline_start_content_edge,
+            inline_end_content_edge,
+            content_inline_size,
+            |_, _, _, _, _, _| {},
+        );
     }
 
     fn assign_block_size(&mut self, layout_context: &LayoutContext) {
@@ -234,40 +288,39 @@ impl Flow for TableCellFlow {
     }
 
     fn compute_stacking_relative_position(&mut self, layout_context: &LayoutContext) {
-        self.block_flow.compute_stacking_relative_position(layout_context)
+        self.block_flow
+            .compute_stacking_relative_position(layout_context)
     }
 
     fn update_late_computed_inline_position_if_necessary(&mut self, inline_position: Au) {
-        self.block_flow.update_late_computed_inline_position_if_necessary(inline_position)
+        self.block_flow
+            .update_late_computed_inline_position_if_necessary(inline_position)
     }
 
     fn update_late_computed_block_position_if_necessary(&mut self, block_position: Au) {
-        self.block_flow.update_late_computed_block_position_if_necessary(block_position)
+        self.block_flow
+            .update_late_computed_block_position_if_necessary(block_position)
     }
 
-    fn build_display_list(&mut self, state: &mut DisplayListBuildState) {
-        if !self.visible {
-            return
-        }
+    fn build_display_list(&mut self, _: &mut DisplayListBuildState) {
+        use style::servo::restyle_damage::ServoRestyleDamage;
+        // This is handled by TableCellStyleInfo::build_display_list()
+        // when the containing table builds its display list
 
-        let border_painting_mode = match self.block_flow
-                                             .fragment
-                                             .style
-                                             .get_inheritedtable()
-                                             .border_collapse {
-            border_collapse::T::separate => BorderPaintingMode::Separate,
-            border_collapse::T::collapse => BorderPaintingMode::Collapse(&self.collapsed_borders),
-        };
-
-        self.block_flow.build_display_list_for_block(state, border_painting_mode)
+        // we skip setting the damage in TableCellStyleInfo::build_display_list()
+        // because we only have immutable access
+        self.block_flow
+            .fragment
+            .restyle_damage
+            .remove(ServoRestyleDamage::REPAINT);
     }
 
     fn collect_stacking_contexts(&mut self, state: &mut StackingContextCollectionState) {
-        self.block_flow.collect_stacking_contexts_for_block(state,
-                                                            StackingContextCollectionFlags::empty());
+        self.block_flow
+            .collect_stacking_contexts_for_block(state, StackingContextCollectionFlags::empty());
     }
 
-    fn repair_style(&mut self, new_style: &::ServoArc<ComputedValues>) {
+    fn repair_style(&mut self, new_style: &crate::ServoArc<ComputedValues>) {
         self.block_flow.repair_style(new_style)
     }
 
@@ -287,14 +340,20 @@ impl Flow for TableCellFlow {
         self.block_flow.generated_containing_block_size(flow)
     }
 
-    fn iterate_through_fragment_border_boxes(&self,
-                                             iterator: &mut FragmentBorderBoxIterator,
-                                             level: i32,
-                                             stacking_context_position: &Point2D<Au>) {
-        self.block_flow.iterate_through_fragment_border_boxes(iterator, level, stacking_context_position)
+    fn iterate_through_fragment_border_boxes(
+        &self,
+        iterator: &mut dyn FragmentBorderBoxIterator,
+        level: i32,
+        stacking_context_position: &Point2D<Au>,
+    ) {
+        self.block_flow.iterate_through_fragment_border_boxes(
+            iterator,
+            level,
+            stacking_context_position,
+        )
     }
 
-    fn mutate_fragments(&mut self, mutator: &mut FnMut(&mut Fragment)) {
+    fn mutate_fragments(&mut self, mutator: &mut dyn FnMut(&mut Fragment)) {
         self.block_flow.mutate_fragments(mutator)
     }
 
@@ -374,67 +433,74 @@ impl CollapsedBordersForCell {
         }
     }
 
-    pub fn adjust_border_bounds_for_painting(&self,
-                                             border_bounds: &mut Rect<Au>,
-                                             writing_mode: WritingMode) {
+    pub fn adjust_border_bounds_for_painting(
+        &self,
+        border_bounds: &mut Rect<Au>,
+        writing_mode: WritingMode,
+    ) {
         let inline_start_divisor = if self.should_paint_inline_start_border() {
             2
         } else {
             -2
         };
-        let inline_start_offset = self.inline_start_width / 2 + self.inline_start_border.width /
-            inline_start_divisor;
+        let inline_start_offset =
+            self.inline_start_width / 2 + self.inline_start_border.width / inline_start_divisor;
         let inline_end_divisor = if self.should_paint_inline_end_border() {
             2
         } else {
             -2
         };
-        let inline_end_offset = self.inline_end_width / 2 + self.inline_end_border.width /
-            inline_end_divisor;
+        let inline_end_offset =
+            self.inline_end_width / 2 + self.inline_end_border.width / inline_end_divisor;
         let block_start_divisor = if self.should_paint_block_start_border() {
             2
         } else {
             -2
         };
-        let block_start_offset = self.block_start_width / 2 + self.block_start_border.width /
-            block_start_divisor;
+        let block_start_offset =
+            self.block_start_width / 2 + self.block_start_border.width / block_start_divisor;
         let block_end_divisor = if self.should_paint_block_end_border() {
             2
         } else {
             -2
         };
-        let block_end_offset = self.block_end_width / 2 + self.block_end_border.width /
-            block_end_divisor;
+        let block_end_offset =
+            self.block_end_width / 2 + self.block_end_border.width / block_end_divisor;
 
         // FIXME(pcwalton): Get the real container size.
         let mut logical_bounds =
             LogicalRect::from_physical(writing_mode, *border_bounds, Size2D::new(Au(0), Au(0)));
         logical_bounds.start.i = logical_bounds.start.i - inline_start_offset;
         logical_bounds.start.b = logical_bounds.start.b - block_start_offset;
-        logical_bounds.size.inline = logical_bounds.size.inline + inline_start_offset +
-            inline_end_offset;
-        logical_bounds.size.block = logical_bounds.size.block + block_start_offset +
-            block_end_offset;
+        logical_bounds.size.inline =
+            logical_bounds.size.inline + inline_start_offset + inline_end_offset;
+        logical_bounds.size.block =
+            logical_bounds.size.block + block_start_offset + block_end_offset;
         *border_bounds = logical_bounds.to_physical(writing_mode, Size2D::new(Au(0), Au(0)))
     }
 
     pub fn adjust_border_colors_and_styles_for_painting(
-            &self,
-            border_colors: &mut SideOffsets2D<Color>,
-            border_styles: &mut SideOffsets2D<border_top_style::T>,
-            writing_mode: WritingMode) {
-        let logical_border_colors = LogicalMargin::new(writing_mode,
-                                                       self.block_start_border.color,
-                                                       self.inline_end_border.color,
-                                                       self.block_end_border.color,
-                                                       self.inline_start_border.color);
+        &self,
+        border_colors: &mut SideOffsets2D<Color>,
+        border_styles: &mut SideOffsets2D<BorderStyle>,
+        writing_mode: WritingMode,
+    ) {
+        let logical_border_colors = LogicalMargin::new(
+            writing_mode,
+            self.block_start_border.color,
+            self.inline_end_border.color,
+            self.block_end_border.color,
+            self.inline_start_border.color,
+        );
         *border_colors = logical_border_colors.to_physical(writing_mode);
 
-        let logical_border_styles = LogicalMargin::new(writing_mode,
-                                                       self.block_start_border.style,
-                                                       self.inline_end_border.style,
-                                                       self.block_end_border.style,
-                                                       self.inline_start_border.style);
+        let logical_border_styles = LogicalMargin::new(
+            writing_mode,
+            self.block_start_border.style,
+            self.inline_end_border.style,
+            self.block_end_border.style,
+            self.inline_start_border.style,
+        );
         *border_styles = logical_border_styles.to_physical(writing_mode);
     }
 }

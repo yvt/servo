@@ -8,9 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-extern crate heapsize;
-
-mod alloc;
+pub mod alloc;
 pub mod hash_map;
 pub mod hash_set;
 mod shim;
@@ -29,14 +27,27 @@ trait Recover<Q: ?Sized> {
 }
 
 #[derive(Debug)]
+pub struct AllocationInfo {
+    /// The size we are requesting.
+    size: usize,
+    /// The alignment we are requesting.
+    alignment: usize,
+}
+
+#[derive(Debug)]
 pub struct FailedAllocationError {
     reason: &'static str,
+    /// The allocation info we are requesting, if needed.
+    allocation_info: Option<AllocationInfo>,
 }
 
 impl FailedAllocationError {
     #[inline]
     pub fn new(reason: &'static str) -> Self {
-        Self { reason }
+        Self {
+            reason,
+            allocation_info: None,
+        }
     }
 }
 
@@ -48,6 +59,13 @@ impl error::Error for FailedAllocationError {
 
 impl fmt::Display for FailedAllocationError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.reason.fmt(f)
+        match self.allocation_info {
+            Some(ref info) => write!(
+                f,
+                "{}, allocation: (size: {}, alignment: {})",
+                self.reason, info.size, info.alignment
+            ),
+            None => self.reason.fmt(f),
+        }
     }
 }

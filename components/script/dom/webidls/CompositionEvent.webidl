@@ -1,6 +1,6 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 /*
  * The origin of this IDL file is
  * https://w3c.github.io/uievents/#idl-compositionevent
@@ -8,8 +8,9 @@
  */
 
 // https://w3c.github.io/uievents/#idl-compositionevent
-[Pref="dom.compositionevent.enabled", Constructor(DOMString type, optional CompositionEventInit eventInitDict)]
+[Exposed=Window, Pref="dom.composition_event.enabled"]
 interface CompositionEvent : UIEvent {
+  [Throws] constructor(DOMString type, optional CompositionEventInit eventInitDict = {});
   readonly attribute DOMString data;
 };
 

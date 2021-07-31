@@ -1,13 +1,11 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! Counting and non-counting Bloom filters tuned for use as ancestor filters
 //! for selector matching.
 
-use fnv::FnvHasher;
 use std::fmt::{self, Debug};
-use std::hash::{Hash, Hasher};
 
 // The top 8 bits of the 32-bit hash value are not used by the bloom filter.
 // Consumers may rely on this to pack hashes more efficiently.
@@ -19,11 +17,6 @@ const KEY_MASK: u32 = (1 << KEY_SIZE) - 1;
 
 /// A counting Bloom filter with 8-bit counters.
 pub type BloomFilter = CountingBloomFilter<BloomStorageU8>;
-
-/// A non-counting Bloom filter.
-///
-/// Effectively a counting Bloom filter with 1-bit counters.
-pub type NonCountingBloomFilter = CountingBloomFilter<BloomStorageBool>;
 
 /// A counting Bloom filter with parameterized storage to handle
 /// counters of different sizes.  For now we assume that having two hash
@@ -71,18 +64,22 @@ pub type NonCountingBloomFilter = CountingBloomFilter<BloomStorageBool>;
 /// Similarly, using a KeySize of 10 would lead to a 4% false
 /// positive rate for N == 100 and to quite bad false positive
 /// rates for larger N.
-#[derive(Clone)]
-pub struct CountingBloomFilter<S> where S: BloomStorage {
+#[derive(Clone, Default)]
+pub struct CountingBloomFilter<S>
+where
+    S: BloomStorage,
+{
     storage: S,
 }
 
-impl<S> CountingBloomFilter<S> where S: BloomStorage {
+impl<S> CountingBloomFilter<S>
+where
+    S: BloomStorage,
+{
     /// Creates a new bloom filter.
     #[inline]
     pub fn new() -> Self {
-        CountingBloomFilter {
-            storage: Default::default(),
-        }
+        Default::default()
     }
 
     #[inline]
@@ -102,47 +99,33 @@ impl<S> CountingBloomFilter<S> where S: BloomStorage {
         unreachable!()
     }
 
+    /// Inserts an item with a particular hash into the bloom filter.
     #[inline]
     pub fn insert_hash(&mut self, hash: u32) {
         self.storage.adjust_first_slot(hash, true);
         self.storage.adjust_second_slot(hash, true);
     }
 
-    /// Inserts an item into the bloom filter.
-    #[inline]
-    pub fn insert<T: Hash>(&mut self, elem: &T) {
-        self.insert_hash(hash(elem))
-    }
-
+    /// Removes an item with a particular hash from the bloom filter.
     #[inline]
     pub fn remove_hash(&mut self, hash: u32) {
         self.storage.adjust_first_slot(hash, false);
         self.storage.adjust_second_slot(hash, false);
     }
 
-    /// Removes an item from the bloom filter.
-    #[inline]
-    pub fn remove<T: Hash>(&mut self, elem: &T) {
-        self.remove_hash(hash(elem))
-    }
-
+    /// Check whether the filter might contain an item with the given hash.
+    /// This can sometimes return true even if the item is not in the filter,
+    /// but will never return false for items that are actually in the filter.
     #[inline]
     pub fn might_contain_hash(&self, hash: u32) -> bool {
-        !self.storage.first_slot_is_empty(hash) &&
-            !self.storage.second_slot_is_empty(hash)
-    }
-
-    /// Check whether the filter might contain an item.  This can
-    /// sometimes return true even if the item is not in the filter,
-    /// but will never return false for items that are actually in the
-    /// filter.
-    #[inline]
-    pub fn might_contain<T: Hash>(&self, elem: &T) -> bool {
-        self.might_contain_hash(hash(elem))
+        !self.storage.first_slot_is_empty(hash) && !self.storage.second_slot_is_empty(hash)
     }
 }
 
-impl<S> Debug for CountingBloomFilter<S> where S: BloomStorage {
+impl<S> Debug for CountingBloomFilter<S>
+where
+    S: BloomStorage,
+{
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut slots_used = 0;
         for i in 0..ARRAY_SIZE {
@@ -154,7 +137,7 @@ impl<S> Debug for CountingBloomFilter<S> where S: BloomStorage {
     }
 }
 
-pub trait BloomStorage : Clone + Default {
+pub trait BloomStorage: Clone + Default {
     fn slot_is_empty(&self, index: usize) -> bool;
     fn adjust_slot(&mut self, index: usize, increment: bool);
     fn is_zeroed(&self) -> bool;
@@ -199,7 +182,8 @@ impl BloomStorage for BloomStorageU8 {
     #[inline]
     fn adjust_slot(&mut self, index: usize, increment: bool) {
         let slot = &mut self.counters[index];
-        if *slot != 0xff {  // full
+        if *slot != 0xff {
+            // full
             if increment {
                 *slot += 1;
             } else {
@@ -249,8 +233,10 @@ impl BloomStorage for BloomStorageBool {
         // Since we have only one bit for storage, decrementing it
         // should never do anything.  Assert against an accidental
         // decrementing of a bit that was never set.
-        assert!(increment || (*byte & bit) != 0,
-                "should not decrement if slot is already false");
+        assert!(
+            increment || (*byte & bit) != 0,
+            "should not decrement if slot is already false"
+        );
 
         if increment {
             *byte |= bit;
@@ -285,13 +271,6 @@ impl Clone for BloomStorageBool {
     }
 }
 
-fn hash<T: Hash>(elem: &T) -> u32 {
-    let mut hasher = FnvHasher::default();
-    elem.hash(&mut hasher);
-    let hash: u64 = hasher.finish();
-    (hash >> 32) as u32 ^ (hash as u32)
-}
-
 #[inline]
 fn hash1(hash: u32) -> u32 {
     hash & KEY_MASK
@@ -304,7 +283,17 @@ fn hash2(hash: u32) -> u32 {
 
 #[test]
 fn create_and_insert_some_stuff() {
+    use fxhash::FxHasher;
+    use std::hash::{Hash, Hasher};
     use std::mem::transmute;
+
+    fn hash_as_str(i: usize) -> u32 {
+        let mut hasher = FxHasher::default();
+        let s = i.to_string();
+        s.hash(&mut hasher);
+        let hash: u64 = hasher.finish();
+        (hash >> 32) as u32 ^ (hash as u32)
+    }
 
     let mut bf = BloomFilter::new();
 
@@ -314,39 +303,42 @@ fn create_and_insert_some_stuff() {
         transmute::<[u8; ARRAY_SIZE % 8], [u8; 0]>([]);
     }
 
-    for i in 0_usize .. 1000 {
-        bf.insert(&i);
+    for i in 0_usize..1000 {
+        bf.insert_hash(hash_as_str(i));
     }
 
-    for i in 0_usize .. 1000 {
-        assert!(bf.might_contain(&i));
+    for i in 0_usize..1000 {
+        assert!(bf.might_contain_hash(hash_as_str(i)));
     }
 
-    let false_positives =
-        (1001_usize .. 2000).filter(|i| bf.might_contain(i)).count();
+    let false_positives = (1001_usize..2000)
+        .filter(|i| bf.might_contain_hash(hash_as_str(*i)))
+        .count();
 
-    assert!(false_positives < 150, "{} is not < 150", false_positives); // 15%.
+    assert!(false_positives < 190, "{} is not < 190", false_positives); // 19%.
 
-    for i in 0_usize .. 100 {
-        bf.remove(&i);
+    for i in 0_usize..100 {
+        bf.remove_hash(hash_as_str(i));
     }
 
-    for i in 100_usize .. 1000 {
-        assert!(bf.might_contain(&i));
+    for i in 100_usize..1000 {
+        assert!(bf.might_contain_hash(hash_as_str(i)));
     }
 
-    let false_positives = (0_usize .. 100).filter(|i| bf.might_contain(i)).count();
+    let false_positives = (0_usize..100)
+        .filter(|i| bf.might_contain_hash(hash_as_str(*i)))
+        .count();
 
     assert!(false_positives < 20, "{} is not < 20", false_positives); // 20%.
 
     bf.clear();
 
-    for i in 0_usize .. 2000 {
-        assert!(!bf.might_contain(&i));
+    for i in 0_usize..2000 {
+        assert!(!bf.might_contain_hash(hash_as_str(i)));
     }
 }
 
-#[cfg(feature = "unstable")]
+#[cfg(feature = "bench")]
 #[cfg(test)]
 mod bench {
     extern crate test;
@@ -376,13 +368,13 @@ mod bench {
             let mut gen1 = HashGenerator::default();
             let mut gen2 = HashGenerator::default();
             let mut bf = BloomFilter::new();
-            for _ in 0_usize .. 1000 {
+            for _ in 0_usize..1000 {
                 bf.insert_hash(gen1.next());
             }
-            for _ in 0_usize .. 100 {
+            for _ in 0_usize..100 {
                 bf.remove_hash(gen2.next());
             }
-            for _ in 100_usize .. 200 {
+            for _ in 100_usize..200 {
                 test::black_box(bf.might_contain_hash(gen2.next()));
             }
         });
@@ -392,8 +384,10 @@ mod bench {
     fn might_contain_10(b: &mut test::Bencher) {
         let bf = BloomFilter::new();
         let mut gen = HashGenerator::default();
-        b.iter(|| for _ in 0..10 {
-            test::black_box(bf.might_contain_hash(gen.next()));
+        b.iter(|| {
+            for _ in 0..10 {
+                test::black_box(bf.might_contain_hash(gen.next()));
+            }
         });
     }
 
@@ -407,8 +401,10 @@ mod bench {
     fn insert_10(b: &mut test::Bencher) {
         let mut bf = BloomFilter::new();
         let mut gen = HashGenerator::default();
-        b.iter(|| for _ in 0..10 {
-            test::black_box(bf.insert_hash(gen.next()));
+        b.iter(|| {
+            for _ in 0..10 {
+                test::black_box(bf.insert_hash(gen.next()));
+            }
         });
     }
 
@@ -417,8 +413,10 @@ mod bench {
         let mut bf = BloomFilter::new();
         let mut gen = HashGenerator::default();
         // Note: this will underflow, and that's ok.
-        b.iter(|| for _ in 0..10 {
-            bf.remove_hash(gen.next())
+        b.iter(|| {
+            for _ in 0..10 {
+                bf.remove_hash(gen.next())
+            }
         });
     }
 }

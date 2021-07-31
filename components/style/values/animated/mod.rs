@@ -1,6 +1,6 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! Animated values.
 //!
@@ -8,25 +8,94 @@
 //! computed values and need yet another intermediate representation. This
 //! module's raison d'être is to ultimately contain all these types.
 
+use crate::properties::PropertyId;
+use crate::values::computed::length::LengthPercentage;
+use crate::values::computed::url::ComputedUrl;
+use crate::values::computed::Angle as ComputedAngle;
+use crate::values::computed::Image;
+use crate::values::specified::SVGPathData;
+use crate::values::CSSFloat;
 use app_units::Au;
-use euclid::{Point2D, Size2D};
 use smallvec::SmallVec;
-use std::cmp::max;
-use values::computed::Angle as ComputedAngle;
-use values::computed::BorderCornerRadius as ComputedBorderCornerRadius;
-#[cfg(feature = "servo")]
-use values::computed::ComputedUrl;
-use values::computed::GreaterThanOrEqualToOneNumber as ComputedGreaterThanOrEqualToOneNumber;
-use values::computed::MaxLength as ComputedMaxLength;
-use values::computed::MozLength as ComputedMozLength;
-use values::computed::NonNegativeLength as ComputedNonNegativeLength;
-use values::computed::NonNegativeLengthOrPercentage as ComputedNonNegativeLengthOrPercentage;
-use values::computed::NonNegativeNumber as ComputedNonNegativeNumber;
-use values::computed::PositiveInteger as ComputedPositiveInteger;
-use values::specified::url::SpecifiedUrl;
+use std::cmp;
 
 pub mod color;
 pub mod effects;
+mod font;
+mod grid;
+mod svg;
+pub mod transform;
+
+/// The category a property falls into for ordering purposes.
+///
+/// https://drafts.csswg.org/web-animations/#calculating-computed-keyframes
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+enum PropertyCategory {
+    Custom,
+    PhysicalLonghand,
+    LogicalLonghand,
+    Shorthand,
+}
+
+impl PropertyCategory {
+    fn of(id: &PropertyId) -> Self {
+        match *id {
+            PropertyId::Shorthand(..) | PropertyId::ShorthandAlias(..) => {
+                PropertyCategory::Shorthand
+            },
+            PropertyId::Longhand(id) | PropertyId::LonghandAlias(id, ..) => {
+                if id.is_logical() {
+                    PropertyCategory::LogicalLonghand
+                } else {
+                    PropertyCategory::PhysicalLonghand
+                }
+            },
+            PropertyId::Custom(..) => PropertyCategory::Custom,
+        }
+    }
+}
+
+/// A comparator to sort PropertyIds such that physical longhands are sorted
+/// before logical longhands and shorthands, shorthands with fewer components
+/// are sorted before shorthands with more components, and otherwise shorthands
+/// are sorted by IDL name as defined by [Web Animations][property-order].
+///
+/// Using this allows us to prioritize values specified by longhands (or smaller
+/// shorthand subsets) when longhands and shorthands are both specified on the
+/// one keyframe.
+///
+/// [property-order] https://drafts.csswg.org/web-animations/#calculating-computed-keyframes
+pub fn compare_property_priority(a: &PropertyId, b: &PropertyId) -> cmp::Ordering {
+    let a_category = PropertyCategory::of(a);
+    let b_category = PropertyCategory::of(b);
+
+    if a_category != b_category {
+        return a_category.cmp(&b_category);
+    }
+
+    if a_category != PropertyCategory::Shorthand {
+        return cmp::Ordering::Equal;
+    }
+
+    let a = a.as_shorthand().unwrap();
+    let b = b.as_shorthand().unwrap();
+    // Within shorthands, sort by the number of subproperties, then by IDL
+    // name.
+    let subprop_count_a = a.longhands().count();
+    let subprop_count_b = b.longhands().count();
+    subprop_count_a
+        .cmp(&subprop_count_b)
+        .then_with(|| a.idl_name_sort_order().cmp(&b.idl_name_sort_order()))
+}
+
+/// A helper function to animate two multiplicative factor.
+pub fn animate_multiplicative_factor(
+    this: CSSFloat,
+    other: CSSFloat,
+    procedure: Procedure,
+) -> Result<CSSFloat, ()> {
+    Ok((this - 1.).animate(&(other - 1.), procedure)? + 1.)
+}
 
 /// Animate from one value to another.
 ///
@@ -37,10 +106,11 @@ pub mod effects;
 /// be equal or an error is returned.
 ///
 /// If a variant is annotated with `#[animation(error)]`, the corresponding
-/// `match` arm is not generated.
+/// `match` arm returns an error.
 ///
-/// If the two values are not similar, an error is returned unless a fallback
-/// function has been specified through `#[animate(fallback)]`.
+/// Trait bounds for type parameter `Foo` can be opted out of with
+/// `#[animation(no_bound(Foo))]` on the type definition, trait bounds for
+/// fields can be opted into with `#[animation(field_bound)]` on the field.
 pub trait Animate: Sized {
     /// Animate a value towards another one, given an animation procedure.
     fn animate(&self, other: &Self, procedure: Procedure) -> Result<Self, ()>;
@@ -48,15 +118,15 @@ pub trait Animate: Sized {
 
 /// An animation procedure.
 ///
-/// https://w3c.github.io/web-animations/#procedures-for-animating-properties
+/// <https://drafts.csswg.org/web-animations/#procedures-for-animating-properties>
 #[allow(missing_docs)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Procedure {
-    /// https://w3c.github.io/web-animations/#animation-interpolation
+    /// <https://drafts.csswg.org/web-animations/#animation-interpolation>
     Interpolate { progress: f64 },
-    /// https://w3c.github.io/web-animations/#animation-addition
+    /// <https://drafts.csswg.org/web-animations/#animation-addition>
     Add,
-    /// https://w3c.github.io/web-animations/#animation-accumulation
+    /// <https://drafts.csswg.org/web-animations/#animation-accumulation>
     Accumulate { count: u64 },
 }
 
@@ -76,9 +146,6 @@ pub trait ToAnimatedValue {
     fn from_animated_value(animated: Self::AnimatedValue) -> Self;
 }
 
-/// Marker trait for computed values with the same representation during animations.
-pub trait AnimatedValueAsComputed {}
-
 /// Returns a value similar to `self` that represents zero.
 ///
 /// This trait is derivable with `#[derive(ToAnimatedValue)]`. If a field is
@@ -87,6 +154,9 @@ pub trait AnimatedValueAsComputed {}
 ///
 /// If a variant is annotated with `#[animation(error)]`, the corresponding
 /// `match` arm is not generated.
+///
+/// Trait bounds for type parameter `Foo` can be opted out of with
+/// `#[animation(no_bound(Foo))]` on the type definition.
 pub trait ToAnimatedZero: Sized {
     /// Returns a value that, when added with an underlying value, will produce the underlying
     /// value. This is used for SMIL animation's "by-animation" where SMIL first interpolates from
@@ -113,7 +183,7 @@ impl Procedure {
     }
 }
 
-/// https://drafts.csswg.org/css-transitions/#animtype-number
+/// <https://drafts.csswg.org/css-transitions/#animtype-number>
 impl Animate for i32 {
     #[inline]
     fn animate(&self, other: &Self, procedure: Procedure) -> Result<Self, ()> {
@@ -121,7 +191,7 @@ impl Animate for i32 {
     }
 }
 
-/// https://drafts.csswg.org/css-transitions/#animtype-number
+/// <https://drafts.csswg.org/css-transitions/#animtype-number>
 impl Animate for f32 {
     #[inline]
     fn animate(&self, other: &Self, procedure: Procedure) -> Result<Self, ()> {
@@ -132,7 +202,7 @@ impl Animate for f32 {
     }
 }
 
-/// https://drafts.csswg.org/css-transitions/#animtype-number
+/// <https://drafts.csswg.org/css-transitions/#animtype-number>
 impl Animate for f64 {
     #[inline]
     fn animate(&self, other: &Self, procedure: Procedure) -> Result<Self, ()> {
@@ -166,29 +236,10 @@ impl Animate for Au {
     }
 }
 
-impl<T> Animate for Size2D<T>
-where
-    T: Animate + Copy,
-{
+impl<T: Animate> Animate for Box<T> {
     #[inline]
     fn animate(&self, other: &Self, procedure: Procedure) -> Result<Self, ()> {
-        Ok(Size2D::new(
-            self.width.animate(&other.width, procedure)?,
-            self.height.animate(&other.height, procedure)?,
-        ))
-    }
-}
-
-impl<T> Animate for Point2D<T>
-where
-    T: Animate + Copy,
-{
-    #[inline]
-    fn animate(&self, other: &Self, procedure: Procedure) -> Result<Self, ()> {
-        Ok(Point2D::new(
-            self.x.animate(&other.x, procedure)?,
-            self.y.animate(&other.y, procedure)?,
-        ))
+        Ok(Box::new((**self).animate(&other, procedure)?))
     }
 }
 
@@ -226,6 +277,66 @@ where
     }
 }
 
+impl<T> ToAnimatedValue for Box<T>
+where
+    T: ToAnimatedValue,
+{
+    type AnimatedValue = Box<<T as ToAnimatedValue>::AnimatedValue>;
+
+    #[inline]
+    fn to_animated_value(self) -> Self::AnimatedValue {
+        Box::new((*self).to_animated_value())
+    }
+
+    #[inline]
+    fn from_animated_value(animated: Self::AnimatedValue) -> Self {
+        Box::new(T::from_animated_value(*animated))
+    }
+}
+
+impl<T> ToAnimatedValue for Box<[T]>
+where
+    T: ToAnimatedValue,
+{
+    type AnimatedValue = Box<[<T as ToAnimatedValue>::AnimatedValue]>;
+
+    #[inline]
+    fn to_animated_value(self) -> Self::AnimatedValue {
+        self.into_vec()
+            .into_iter()
+            .map(T::to_animated_value)
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+    }
+
+    #[inline]
+    fn from_animated_value(animated: Self::AnimatedValue) -> Self {
+        animated
+            .into_vec()
+            .into_iter()
+            .map(T::from_animated_value)
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+    }
+}
+
+impl<T> ToAnimatedValue for crate::OwnedSlice<T>
+where
+    T: ToAnimatedValue,
+{
+    type AnimatedValue = crate::OwnedSlice<<T as ToAnimatedValue>::AnimatedValue>;
+
+    #[inline]
+    fn to_animated_value(self) -> Self::AnimatedValue {
+        self.into_box().to_animated_value().into()
+    }
+
+    #[inline]
+    fn from_animated_value(animated: Self::AnimatedValue) -> Self {
+        Self::from(Box::from_animated_value(animated.into_box()))
+    }
+}
+
 impl<T> ToAnimatedValue for SmallVec<[T; 1]>
 where
     T: ToAnimatedValue,
@@ -243,192 +354,80 @@ where
     }
 }
 
-impl AnimatedValueAsComputed for Au {}
-impl AnimatedValueAsComputed for ComputedAngle {}
-impl AnimatedValueAsComputed for SpecifiedUrl {}
-#[cfg(feature = "servo")]
-impl AnimatedValueAsComputed for ComputedUrl {}
-impl AnimatedValueAsComputed for bool {}
-impl AnimatedValueAsComputed for f32 {}
+macro_rules! trivial_to_animated_value {
+    ($ty:ty) => {
+        impl $crate::values::animated::ToAnimatedValue for $ty {
+            type AnimatedValue = Self;
 
-impl<T> ToAnimatedValue for T
-where
-    T: AnimatedValueAsComputed,
-{
-    type AnimatedValue = Self;
+            #[inline]
+            fn to_animated_value(self) -> Self {
+                self
+            }
 
-    #[inline]
-    fn to_animated_value(self) -> Self {
-        self
-    }
-
-    #[inline]
-    fn from_animated_value(animated: Self::AnimatedValue) -> Self {
-        animated
-    }
-}
-
-impl ToAnimatedValue for ComputedNonNegativeNumber {
-    type AnimatedValue = Self;
-
-    #[inline]
-    fn to_animated_value(self) -> Self {
-        self
-    }
-
-    #[inline]
-    fn from_animated_value(animated: Self::AnimatedValue) -> Self {
-        animated.0.max(0.).into()
-    }
-}
-
-impl ToAnimatedValue for ComputedGreaterThanOrEqualToOneNumber {
-    type AnimatedValue = Self;
-
-    #[inline]
-    fn to_animated_value(self) -> Self {
-        self
-    }
-
-    #[inline]
-    fn from_animated_value(animated: Self::AnimatedValue) -> Self {
-        animated.0.max(1.).into()
-    }
-}
-
-impl ToAnimatedValue for ComputedNonNegativeLength {
-    type AnimatedValue = Self;
-
-    #[inline]
-    fn to_animated_value(self) -> Self {
-        self
-    }
-
-    #[inline]
-    fn from_animated_value(animated: Self::AnimatedValue) -> Self {
-        ComputedNonNegativeLength::new(animated.px().max(0.))
-    }
-}
-
-impl ToAnimatedValue for ComputedPositiveInteger {
-    type AnimatedValue = Self;
-
-    #[inline]
-    fn to_animated_value(self) -> Self {
-        self
-    }
-
-    #[inline]
-    fn from_animated_value(animated: Self::AnimatedValue) -> Self {
-        max(animated.0, 1).into()
-    }
-}
-
-impl ToAnimatedValue for ComputedNonNegativeLengthOrPercentage {
-    type AnimatedValue = Self;
-
-    #[inline]
-    fn to_animated_value(self) -> Self {
-        self
-    }
-
-    #[inline]
-    fn from_animated_value(animated: Self::AnimatedValue) -> Self {
-        animated.0.clamp_to_non_negative().into()
-    }
-}
-
-impl ToAnimatedValue for ComputedBorderCornerRadius {
-    type AnimatedValue = Self;
-
-    #[inline]
-    fn to_animated_value(self) -> Self {
-        self
-    }
-
-    #[inline]
-    fn from_animated_value(animated: Self::AnimatedValue) -> Self {
-        ComputedBorderCornerRadius::new((animated.0).0.width.clamp_to_non_negative(),
-                                        (animated.0).0.height.clamp_to_non_negative())
-    }
-}
-
-impl ToAnimatedValue for ComputedMaxLength {
-    type AnimatedValue = Self;
-
-    #[inline]
-    fn to_animated_value(self) -> Self {
-        self
-    }
-
-    #[inline]
-    fn from_animated_value(animated: Self::AnimatedValue) -> Self {
-        use values::computed::{Length, LengthOrPercentageOrNone, Percentage};
-        match animated {
-            ComputedMaxLength::LengthOrPercentageOrNone(lopn) => {
-                let result = match lopn {
-                    LengthOrPercentageOrNone::Length(px) => {
-                        LengthOrPercentageOrNone::Length(Length::new(px.px().max(0.)))
-                    },
-                    LengthOrPercentageOrNone::Percentage(percentage) => {
-                        LengthOrPercentageOrNone::Percentage(Percentage(percentage.0.max(0.)))
-                    }
-                    _ => lopn
-                };
-                ComputedMaxLength::LengthOrPercentageOrNone(result)
-            },
-            _ => animated
+            #[inline]
+            fn from_animated_value(animated: Self::AnimatedValue) -> Self {
+                animated
+            }
         }
-    }
+    };
 }
 
-impl ToAnimatedValue for ComputedMozLength {
-    type AnimatedValue = Self;
-
-    #[inline]
-    fn to_animated_value(self) -> Self {
-        self
-    }
-
-    #[inline]
-    fn from_animated_value(animated: Self::AnimatedValue) -> Self {
-        use values::computed::{Length, LengthOrPercentageOrAuto, Percentage};
-        match animated {
-            ComputedMozLength::LengthOrPercentageOrAuto(lopa) => {
-                let result = match lopa {
-                    LengthOrPercentageOrAuto::Length(px) => {
-                        LengthOrPercentageOrAuto::Length(Length::new(px.px().max(0.)))
-                    },
-                    LengthOrPercentageOrAuto::Percentage(percentage) => {
-                        LengthOrPercentageOrAuto::Percentage(Percentage(percentage.0.max(0.)))
-                    }
-                    _ => lopa
-                };
-                ComputedMozLength::LengthOrPercentageOrAuto(result)
-            },
-            _ => animated
-        }
-    }
-}
+trivial_to_animated_value!(Au);
+trivial_to_animated_value!(LengthPercentage);
+trivial_to_animated_value!(ComputedAngle);
+trivial_to_animated_value!(ComputedUrl);
+trivial_to_animated_value!(bool);
+trivial_to_animated_value!(f32);
+// Note: This implementation is for ToAnimatedValue of ShapeSource.
+//
+// SVGPathData uses Box<[T]>. If we want to derive ToAnimatedValue for all the
+// types, we have to do "impl ToAnimatedValue for Box<[T]>" first.
+// However, the general version of "impl ToAnimatedValue for Box<[T]>" needs to
+// clone |T| and convert it into |T::AnimatedValue|. However, for SVGPathData
+// that is unnecessary--moving |T| is sufficient. So here, we implement this
+// trait manually.
+trivial_to_animated_value!(SVGPathData);
+// FIXME: Bug 1514342, Image is not animatable, but we still need to implement
+// this to avoid adding this derive to generic::Image and all its arms. We can
+// drop this after landing Bug 1514342.
+trivial_to_animated_value!(Image);
 
 impl ToAnimatedZero for Au {
     #[inline]
-    fn to_animated_zero(&self) -> Result<Self, ()> { Ok(Au(0)) }
+    fn to_animated_zero(&self) -> Result<Self, ()> {
+        Ok(Au(0))
+    }
 }
 
 impl ToAnimatedZero for f32 {
     #[inline]
-    fn to_animated_zero(&self) -> Result<Self, ()> { Ok(0.) }
+    fn to_animated_zero(&self) -> Result<Self, ()> {
+        Ok(0.)
+    }
 }
 
 impl ToAnimatedZero for f64 {
     #[inline]
-    fn to_animated_zero(&self) -> Result<Self, ()> { Ok(0.) }
+    fn to_animated_zero(&self) -> Result<Self, ()> {
+        Ok(0.)
+    }
 }
 
 impl ToAnimatedZero for i32 {
     #[inline]
-    fn to_animated_zero(&self) -> Result<Self, ()> { Ok(0) }
+    fn to_animated_zero(&self) -> Result<Self, ()> {
+        Ok(0)
+    }
+}
+
+impl<T> ToAnimatedZero for Box<T>
+where
+    T: ToAnimatedZero,
+{
+    #[inline]
+    fn to_animated_zero(&self) -> Result<Self, ()> {
+        Ok(Box::new((**self).to_animated_zero()?))
+    }
 }
 
 impl<T> ToAnimatedZero for Option<T>
@@ -441,5 +440,49 @@ where
             Some(ref value) => Ok(Some(value.to_animated_zero()?)),
             None => Ok(None),
         }
+    }
+}
+
+impl<T> ToAnimatedZero for Vec<T>
+where
+    T: ToAnimatedZero,
+{
+    #[inline]
+    fn to_animated_zero(&self) -> Result<Self, ()> {
+        self.iter().map(|v| v.to_animated_zero()).collect()
+    }
+}
+
+impl<T> ToAnimatedZero for Box<[T]>
+where
+    T: ToAnimatedZero,
+{
+    #[inline]
+    fn to_animated_zero(&self) -> Result<Self, ()> {
+        self.iter().map(|v| v.to_animated_zero()).collect()
+    }
+}
+
+impl<T> ToAnimatedZero for crate::OwnedSlice<T>
+where
+    T: ToAnimatedZero,
+{
+    #[inline]
+    fn to_animated_zero(&self) -> Result<Self, ()> {
+        self.iter().map(|v| v.to_animated_zero()).collect()
+    }
+}
+
+impl<T> ToAnimatedZero for crate::ArcSlice<T>
+where
+    T: ToAnimatedZero,
+{
+    #[inline]
+    fn to_animated_zero(&self) -> Result<Self, ()> {
+        let v = self
+            .iter()
+            .map(|v| v.to_animated_zero())
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(crate::ArcSlice::from_iter(v.into_iter()))
     }
 }

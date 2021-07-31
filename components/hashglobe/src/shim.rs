@@ -1,5 +1,6 @@
 use std::marker::PhantomData;
 
+// FIXME: remove this and use std::ptr::NonNull when Firefox requires Rust 1.25+
 pub struct NonZeroPtr<T: 'static>(&'static T);
 
 impl<T: 'static> NonZeroPtr<T> {
@@ -28,11 +29,11 @@ impl<T: 'static> Unique<T> {
     }
 }
 
-unsafe impl<T: Send + 'static> Send for Unique<T> { }
+unsafe impl<T: Send + 'static> Send for Unique<T> {}
 
-unsafe impl<T: Sync + 'static> Sync for Unique<T> { }
+unsafe impl<T: Sync + 'static> Sync for Unique<T> {}
 
-pub struct Shared<T: 'static>  {
+pub struct Shared<T: 'static> {
     ptr: NonZeroPtr<T>,
     _marker: PhantomData<T>,
     // force it to be !Send/!Sync

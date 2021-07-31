@@ -1,29 +1,23 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! Timing functions.
 
-use heartbeats;
-use influent::client::{Client, Credentials};
-use influent::create_client;
-use influent::measurement::{Measurement, Value};
+use crate::trace_dump::TraceDump;
 use ipc_channel::ipc::{self, IpcReceiver};
-use profile_traits::energy::{energy_interval_ms, read_energy_uj};
-use profile_traits::time::{ProfilerCategory, ProfilerChan, ProfilerMsg, TimerMetadata};
+use profile_traits::time::{
+    ProfilerCategory, ProfilerChan, ProfilerData, ProfilerMsg, TimerMetadata,
+};
 use profile_traits::time::{TimerMetadataFrameType, TimerMetadataReflowType};
 use servo_config::opts::OutputOptions;
-use std::{f64, thread, u32, u64};
 use std::borrow::ToOwned;
-use std::cmp::Ordering;
-use std::collections::BTreeMap;
-use std::error::Error;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::Duration;
-use std_time::precise_time_ns;
-use trace_dump::TraceDump;
+use std::{f64, thread, u32, u64};
 
 pub trait Formattable {
     fn format(&self, output: &Option<OutputOptions>) -> String;
@@ -50,11 +44,7 @@ impl Formattable for Option<TimerMetadata> {
                     },
                     _ => {
                         /* The profiling output is the terminal */
-                        let url = if url.len() > 30 {
-                            &url[..30]
-                        } else {
-                            url
-                        };
+                        let url = if url.len() > 30 { &url[..30] } else { url };
                         let incremental = match meta.incremental {
                             TimerMetadataReflowType::Incremental => "    yes",
                             TimerMetadataReflowType::FirstReflow => "    no ",
@@ -67,16 +57,12 @@ impl Formattable for Option<TimerMetadata> {
                     },
                 }
             },
-            None => {
-                match *output {
-                    Some(OutputOptions::FileName(_)) => {
-                        format!(" {}\t{}\t{}", "    N/A", "  N/A", "             N/A")
-                    },
-                    _ => {
-                        format!(" {:14} {:9} {:30}", "    N/A", "  N/A", "             N/A")
-                    }
-                }
-            }
+            None => match *output {
+                Some(OutputOptions::FileName(_)) => {
+                    format!(" {}\t{}\t{}", "    N/A", "  N/A", "             N/A")
+                },
+                _ => format!(" {:14} {:9} {:30}", "    N/A", "  N/A", "             N/A"),
+            },
         }
     }
 }
@@ -102,7 +88,7 @@ impl Formattable for ProfilerCategory {
             ProfilerCategory::LayoutSelectorMatch |
             ProfilerCategory::LayoutTreeBuilder |
             ProfilerCategory::LayoutTextShaping => "| + ",
-            _ => ""
+            _ => "",
         };
         let name = match *self {
             ProfilerCategory::Compositing => "Compositing",
@@ -134,12 +120,14 @@ impl Formattable for ProfilerCategory {
             ProfilerCategory::ScriptDomEvent => "Script Dom Event",
             ProfilerCategory::ScriptEvaluate => "Script JS Evaluate",
             ProfilerCategory::ScriptFileRead => "Script File Read",
+            ProfilerCategory::ScriptHistoryEvent => "Script History Event",
             ProfilerCategory::ScriptImageCacheMsg => "Script Image Cache Msg",
             ProfilerCategory::ScriptInputEvent => "Script Input Event",
             ProfilerCategory::ScriptNetworkEvent => "Script Network Event",
             ProfilerCategory::ScriptParseHTML => "Script Parse HTML",
             ProfilerCategory::ScriptParseXML => "Script Parse XML",
             ProfilerCategory::ScriptPlannedNavigation => "Script Planned Navigation",
+            ProfilerCategory::ScriptPortMessage => "Script Port Message",
             ProfilerCategory::ScriptResize => "Script Resize",
             ProfilerCategory::ScriptEvent => "Script Event",
             ProfilerCategory::ScriptUpdateReplacedElement => "Script Update Replaced Element",
@@ -155,9 +143,12 @@ impl Formattable for ProfilerCategory {
             ProfilerCategory::ScriptWebVREvent => "Script WebVR Event",
             ProfilerCategory::ScriptWorkletEvent => "Script Worklet Event",
             ProfilerCategory::ScriptPerformanceEvent => "Script Performance Event",
+            ProfilerCategory::ScriptWebGPUMsg => "Script WebGPU Message",
             ProfilerCategory::TimeToFirstPaint => "Time To First Paint",
             ProfilerCategory::TimeToFirstContentfulPaint => "Time To First Contentful Paint",
-            ProfilerCategory::ApplicationHeartbeat => "Application Heartbeat",
+            ProfilerCategory::TimeToInteractive => "Time to Interactive",
+            ProfilerCategory::IpcReceiver => "Blocked at IPC Receive",
+            ProfilerCategory::IpcBytesReceiver => "Blocked at IPC Bytes Receive",
         };
         format!("{}{}", padding, name)
     }
@@ -172,6 +163,7 @@ pub struct Profiler {
     output: Option<OutputOptions>,
     pub last_msg: Option<ProfilerMsg>,
     trace: Option<TraceDump>,
+    blocked_layout_queries: HashMap<String, u32>,
 }
 
 impl Profiler {
@@ -181,27 +173,29 @@ impl Profiler {
             Some(ref option) => {
                 // Spawn the time profiler thread
                 let outputoption = option.clone();
-                thread::Builder::new().name("Time profiler".to_owned()).spawn(move || {
-                    let trace = file_path.as_ref()
-                        .and_then(|p| TraceDump::new(p).ok());
-                    let mut profiler = Profiler::new(port, trace, Some(outputoption));
-                    profiler.start();
-                }).expect("Thread spawning failed");
+                thread::Builder::new()
+                    .name("TimeProfiler".to_owned())
+                    .spawn(move || {
+                        let trace = file_path.as_ref().and_then(|p| TraceDump::new(p).ok());
+                        let mut profiler = Profiler::new(port, trace, Some(outputoption));
+                        profiler.start();
+                    })
+                    .expect("Thread spawning failed");
                 // decide if we need to spawn the timer thread
                 match option {
-                    &OutputOptions::FileName(_) |
-                    &OutputOptions::DB(_, _, _, _) => { /* no timer thread needed */ },
+                    &OutputOptions::FileName(_) => { /* no timer thread needed */ },
                     &OutputOptions::Stdout(period) => {
                         // Spawn a timer thread
                         let chan = chan.clone();
-                        thread::Builder::new().name("Time profiler timer".to_owned()).spawn(move || {
-                            loop {
+                        thread::Builder::new()
+                            .name("TimeProfTimer".to_owned())
+                            .spawn(move || loop {
                                 thread::sleep(duration_from_seconds(period));
                                 if chan.send(ProfilerMsg::Print).is_err() {
                                     break;
                                 }
-                            }
-                        }).expect("Thread spawning failed");
+                            })
+                            .expect("Thread spawning failed");
                     },
                 }
             },
@@ -209,91 +203,56 @@ impl Profiler {
                 // this is when the -p option hasn't been specified
                 if file_path.is_some() {
                     // Spawn the time profiler
-                    thread::Builder::new().name("Time profiler".to_owned()).spawn(move || {
-                        let trace = file_path.as_ref()
-                            .and_then(|p| TraceDump::new(p).ok());
-                        let mut profiler = Profiler::new(port, trace, None);
-                        profiler.start();
-                    }).expect("Thread spawning failed");
+                    thread::Builder::new()
+                        .name("TimeProfiler".to_owned())
+                        .spawn(move || {
+                            let trace = file_path.as_ref().and_then(|p| TraceDump::new(p).ok());
+                            let mut profiler = Profiler::new(port, trace, None);
+                            profiler.start();
+                        })
+                        .expect("Thread spawning failed");
                 } else {
                     // No-op to handle messages when the time profiler is not printing:
-                    thread::Builder::new().name("Time profiler".to_owned()).spawn(move || {
-                        loop {
+                    thread::Builder::new()
+                        .name("TimeProfiler".to_owned())
+                        .spawn(move || loop {
                             match port.recv() {
                                 Err(_) => break,
                                 Ok(ProfilerMsg::Exit(chan)) => {
                                     let _ = chan.send(());
                                     break;
                                 },
-                                _ => {}
+                                _ => {},
                             }
-                        }
-                    }).expect("Thread spawning failed");
+                        })
+                        .expect("Thread spawning failed");
                 }
-            }
+            },
         }
 
-        heartbeats::init();
-        let profiler_chan = ProfilerChan(chan);
-
-        // only spawn the application-level profiler thread if its heartbeat is enabled
-        let run_ap_thread = || {
-            heartbeats::is_heartbeat_enabled(&ProfilerCategory::ApplicationHeartbeat)
-        };
-        if run_ap_thread() {
-            let profiler_chan = profiler_chan.clone();
-            // min of 1 heartbeat/sec, max of 20 should provide accurate enough power/energy readings
-            // waking up more frequently allows the thread to end faster on exit
-            const SLEEP_MS: u32 = 10;
-            const MIN_ENERGY_INTERVAL_MS: u32 = 50;
-            const MAX_ENERGY_INTERVAL_MS: u32 = 1000;
-            let interval_ms = enforce_range(MIN_ENERGY_INTERVAL_MS, MAX_ENERGY_INTERVAL_MS, energy_interval_ms());
-            let loop_count: u32 = (interval_ms as f32 / SLEEP_MS as f32).ceil() as u32;
-            thread::Builder::new().name("Application heartbeat profiler".to_owned()).spawn(move || {
-                let mut start_time = precise_time_ns();
-                let mut start_energy = read_energy_uj();
-                loop {
-                    for _ in 0..loop_count {
-                        if run_ap_thread() {
-                            thread::sleep(Duration::from_millis(SLEEP_MS as u64))
-                        } else {
-                            return
-                        }
-                    }
-                    let end_time = precise_time_ns();
-                    let end_energy = read_energy_uj();
-                    // send using the inner channel
-                    // (using ProfilerChan.send() forces an unwrap and sometimes panics for this background profiler)
-                    let ProfilerChan(ref c) = profiler_chan;
-                    if let Err(_) = c.send(ProfilerMsg::Time((ProfilerCategory::ApplicationHeartbeat, None),
-                                                             (start_time, end_time),
-                                                             (start_energy, end_energy))) {
-                        return;
-                    }
-                    start_time = end_time;
-                    start_energy = end_energy;
-                }
-            }).expect("Thread spawning failed");
-        }
-
-        profiler_chan
+        ProfilerChan(chan)
     }
 
-    pub fn new(port: IpcReceiver<ProfilerMsg>, trace: Option<TraceDump>, output: Option<OutputOptions>) -> Profiler {
+    pub fn new(
+        port: IpcReceiver<ProfilerMsg>,
+        trace: Option<TraceDump>,
+        output: Option<OutputOptions>,
+    ) -> Profiler {
         Profiler {
             port: port,
             buckets: BTreeMap::new(),
             output: output,
             last_msg: None,
             trace: trace,
+            blocked_layout_queries: HashMap::new(),
         }
     }
 
     pub fn start(&mut self) {
         while let Ok(msg) = self.port.recv() {
-           if !self.handle_msg(msg) {
-               break
-           }
+            if !self.handle_msg(msg) {
+                break;
+            }
         }
     }
 
@@ -303,20 +262,32 @@ impl Profiler {
 
     fn handle_msg(&mut self, msg: ProfilerMsg) -> bool {
         match msg.clone() {
-            ProfilerMsg::Time(k, t, e) => {
-                heartbeats::maybe_heartbeat(&k.0, t.0, t.1, e.0, e.1);
+            ProfilerMsg::Time(k, t) => {
                 if let Some(ref mut trace) = self.trace {
-                    trace.write_one(&k, t, e);
+                    trace.write_one(&k, t);
                 }
                 let ms = (t.1 - t.0) as f64 / 1000000f64;
                 self.find_or_insert(k, ms);
             },
-            ProfilerMsg::Print => if let Some(ProfilerMsg::Time(..)) = self.last_msg {
-                // only print if more data has arrived since the last printout
-                self.print_buckets();
+            ProfilerMsg::Print => {
+                if let Some(ProfilerMsg::Time(..)) = self.last_msg {
+                    // only print if more data has arrived since the last printout
+                    self.print_buckets();
+                }
+            },
+            ProfilerMsg::Get(k, sender) => {
+                let vec_option = self.buckets.get(&k);
+                match vec_option {
+                    Some(vec_entry) => sender
+                        .send(ProfilerData::Record(vec_entry.to_vec()))
+                        .unwrap(),
+                    None => sender.send(ProfilerData::NoRecords).unwrap(),
+                };
+            },
+            ProfilerMsg::BlockedLayoutQuery(url) => {
+                *self.blocked_layout_queries.entry(url).or_insert(0) += 1;
             },
             ProfilerMsg::Exit(chan) => {
-                heartbeats::cleanup();
                 self.print_buckets();
                 let _ = chan.send(());
                 return false;
@@ -335,11 +306,12 @@ impl Profiler {
 
         let data_len = data.len();
         debug_assert!(data_len > 0);
-        let (mean, median, min, max) =
-            (data.iter().sum::<f64>() / (data_len as f64),
+        let (mean, median, min, max) = (
+            data.iter().sum::<f64>() / (data_len as f64),
             data[data_len / 2],
             data[0],
-            data[data_len - 1]);
+            data[data_len - 1],
+        );
         (mean, median, min, max)
     }
 
@@ -348,100 +320,87 @@ impl Profiler {
             Some(OutputOptions::FileName(ref filename)) => {
                 let path = Path::new(&filename);
                 let mut file = match File::create(&path) {
-                    Err(e) => panic!("Couldn't create {}: {}",
-                                     path.display(),
-                                     Error::description(&e)),
+                    Err(e) => panic!("Couldn't create {}: {}", path.display(), e),
                     Ok(file) => file,
                 };
-                write!(file, "_category_\t_incremental?_\t_iframe?_\t_url_\t_mean (ms)_\t\
-                    _median (ms)_\t_min (ms)_\t_max (ms)_\t_events_\n").unwrap();
+                write!(
+                    file,
+                    "_category_\t_incremental?_\t_iframe?_\t_url_\t_mean (ms)_\t\
+                     _median (ms)_\t_min (ms)_\t_max (ms)_\t_events_\n"
+                )
+                .unwrap();
                 for (&(ref category, ref meta), ref mut data) in &mut self.buckets {
                     data.sort_by(|a, b| a.partial_cmp(b).expect("No NaN values in profiles"));
                     let data_len = data.len();
                     if data_len > 0 {
                         let (mean, median, min, max) = Self::get_statistics(data);
-                        write!(file, "{}\t{}\t{:15.4}\t{:15.4}\t{:15.4}\t{:15.4}\t{:15}\n",
-                            category.format(&self.output), meta.format(&self.output),
-                            mean, median, min, max, data_len).unwrap();
+                        write!(
+                            file,
+                            "{}\t{}\t{:15.4}\t{:15.4}\t{:15.4}\t{:15.4}\t{:15}\n",
+                            category.format(&self.output),
+                            meta.format(&self.output),
+                            mean,
+                            median,
+                            min,
+                            max,
+                            data_len
+                        )
+                        .unwrap();
                     }
+                }
+
+                write!(file, "_url\t_blocked layout queries_\n").unwrap();
+                for (url, count) in &self.blocked_layout_queries {
+                    write!(file, "{}\t{}\n", url, count).unwrap();
                 }
             },
             Some(OutputOptions::Stdout(_)) => {
                 let stdout = io::stdout();
                 let mut lock = stdout.lock();
 
-                writeln!(&mut lock, "{:35} {:14} {:9} {:30} {:15} {:15} {:-15} {:-15} {:-15}",
-                         "_category_", "_incremental?_", "_iframe?_",
-                         "            _url_", "    _mean (ms)_", "  _median (ms)_",
-                         "     _min (ms)_", "     _max (ms)_", "      _events_").unwrap();
+                writeln!(
+                    &mut lock,
+                    "{:35} {:14} {:9} {:30} {:15} {:15} {:-15} {:-15} {:-15}",
+                    "_category_",
+                    "_incremental?_",
+                    "_iframe?_",
+                    "            _url_",
+                    "    _mean (ms)_",
+                    "  _median (ms)_",
+                    "     _min (ms)_",
+                    "     _max (ms)_",
+                    "      _events_"
+                )
+                .unwrap();
                 for (&(ref category, ref meta), ref mut data) in &mut self.buckets {
                     data.sort_by(|a, b| a.partial_cmp(b).expect("No NaN values in profiles"));
                     let data_len = data.len();
                     if data_len > 0 {
                         let (mean, median, min, max) = Self::get_statistics(data);
-                        writeln!(&mut lock, "{:-35}{} {:15.4} {:15.4} {:15.4} {:15.4} {:15}",
-                                 category.format(&self.output), meta.format(&self.output), mean, median, min, max,
-                                 data_len).unwrap();
+                        writeln!(
+                            &mut lock,
+                            "{:-35}{} {:15.4} {:15.4} {:15.4} {:15.4} {:15}",
+                            category.format(&self.output),
+                            meta.format(&self.output),
+                            mean,
+                            median,
+                            min,
+                            max,
+                            data_len
+                        )
+                        .unwrap();
                     }
                 }
                 writeln!(&mut lock, "").unwrap();
-            },
-            Some(OutputOptions::DB(ref hostname, ref dbname, ref user, ref password)) => {
-                // Unfortunately, influent does not like hostnames ending with "/"
-                let mut hostname = hostname.to_string();
-                if hostname.ends_with("/") {
-                    hostname.pop();
+
+                writeln!(&mut lock, "_url_\t_blocked layout queries_").unwrap();
+                for (url, count) in &self.blocked_layout_queries {
+                    writeln!(&mut lock, "{}\t{}", url, count).unwrap();
                 }
-
-                let empty = String::from("");
-                let username = user.as_ref().unwrap_or(&empty);
-                let password = password.as_ref().unwrap_or(&empty);
-                let database = dbname.as_ref().unwrap_or(&empty);
-                let credentials = Credentials {
-                    username: username,
-                    password: password,
-                    database: database,
-                };
-
-                let hosts = vec![hostname.as_str()];
-                let client = create_client(credentials, hosts);
-
-                for (&(ref category, ref meta), ref mut data) in &mut self.buckets {
-                    data.sort_by(|a, b| a.partial_cmp(b).expect("No NaN values in profiles"));
-                    let data_len = data.len();
-                    if data_len > 0 {
-                        let (mean, median, min, max) = Self::get_statistics(data);
-                        let category = category.format(&self.output);
-                        let mut measurement = Measurement::new(&category);
-                        measurement.add_field("mean", Value::Float(mean));
-                        measurement.add_field("median", Value::Float(median));
-                        measurement.add_field("min", Value::Float(min));
-                        measurement.add_field("max", Value::Float(max));
-                        if let Some(ref meta) = *meta {
-                            measurement.add_tag("host", meta.url.as_str());
-                        };
-                        if client.write_one(measurement, None).is_err() {
-                            warn!("Could not write measurement to profiler db");
-                        }
-                    }
-                }
-
+                writeln!(&mut lock, "").unwrap();
             },
             None => { /* Do nothing if no output option has been set */ },
         };
-    }
-}
-
-fn enforce_range<T>(min: T, max: T, value: T) -> T where T: Ord {
-    assert!(min <= max);
-    match value.cmp(&max) {
-        Ordering::Equal | Ordering::Greater => max,
-        Ordering::Less => {
-            match value.cmp(&min) {
-                Ordering::Equal | Ordering::Less => min,
-                Ordering::Greater => value,
-            }
-        },
     }
 }
 

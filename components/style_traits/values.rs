@@ -1,12 +1,13 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! Helper types and traits for the handling of CSS values.
 
 use app_units::Au;
-use cssparser::{BasicParseError, ParseError, Parser, Token, UnicodeRange, serialize_string};
 use cssparser::ToCss as CssparserToCss;
+use cssparser::{serialize_string, ParseError, Parser, Token, UnicodeRange};
+use servo_arc::Arc;
 use std::fmt::{self, Write};
 
 /// Serialises a value according to its CSS representation.
@@ -23,11 +24,33 @@ use std::fmt::{self, Write};
 ///   commas, otherwise, by spaces;
 /// * if `#[css(function)]` is found on a variant, the variant name gets
 ///   serialised like unit variants and its fields are surrounded by parentheses;
+/// * if `#[css(iterable)]` is found on a function variant, that variant needs
+///   to have a single member, and that member needs to be iterable. The
+///   iterable will be serialized as the arguments for the function;
+/// * an iterable field can also be annotated with `#[css(if_empty = "foo")]`
+///   to print `"foo"` if the iterator is empty;
+/// * if `#[css(dimension)]` is found on a variant, that variant needs
+///   to have a single member. The variant would be serialized as a CSS
+///   dimension token, like: <member><identifier>;
+/// * if `#[css(skip)]` is found on a field, the `ToCss` call for that field
+///   is skipped;
+/// * if `#[css(skip_if = "function")]` is found on a field, the `ToCss` call
+///   for that field is skipped if `function` returns true. This function is
+///   provided the field as an argument;
+/// * if `#[css(contextual_skip_if = "function")]` is found on a field, the
+///   `ToCss` call for that field is skipped if `function` returns true. This
+///   function is given all the fields in the current struct or variant as an
+///   argument;
+/// * `#[css(represents_keyword)]` can be used on bool fields in order to
+///   serialize the field name if the field is true, or nothing otherwise.  It
+///   also collects those keywords for `SpecifiedValueInfo`.
 /// * finally, one can put `#[css(derive_debug)]` on the whole type, to
 ///   implement `Debug` by a single call to `ToCss::to_css`.
 pub trait ToCss {
     /// Serialize `self` in CSS syntax, writing to `dest`.
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: Write;
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write;
 
     /// Serialize `self` in CSS syntax and return a string.
     ///
@@ -35,27 +58,49 @@ pub trait ToCss {
     #[inline]
     fn to_css_string(&self) -> String {
         let mut s = String::new();
-        self.to_css(&mut s).unwrap();
+        self.to_css(&mut CssWriter::new(&mut s)).unwrap();
         s
     }
 }
 
-impl<'a, T> ToCss for &'a T where T: ToCss + ?Sized {
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: Write {
+impl<'a, T> ToCss for &'a T
+where
+    T: ToCss + ?Sized,
+{
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
+    {
         (*self).to_css(dest)
+    }
+}
+
+impl ToCss for crate::owned_str::OwnedStr {
+    #[inline]
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
+    {
+        serialize_string(self, dest)
     }
 }
 
 impl ToCss for str {
     #[inline]
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: Write {
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
+    {
         serialize_string(self, dest)
     }
 }
 
 impl ToCss for String {
     #[inline]
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: Write {
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
+    {
         serialize_string(self, dest)
     }
 }
@@ -65,46 +110,149 @@ where
     T: ToCss,
 {
     #[inline]
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: Write {
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
+    {
         self.as_ref().map_or(Ok(()), |value| value.to_css(dest))
     }
 }
 
-#[macro_export]
-macro_rules! serialize_function {
-    ($dest: expr, $name: ident($( $arg: expr, )+)) => {
-        serialize_function!($dest, $name($($arg),+))
-    };
-    ($dest: expr, $name: ident($first_arg: expr $( , $arg: expr )*)) => {
-        {
-            $dest.write_str(concat!(stringify!($name), "("))?;
-            $first_arg.to_css($dest)?;
-            $(
-                $dest.write_str(", ")?;
-                $arg.to_css($dest)?;
-            )*
-            $dest.write_char(')')
+impl ToCss for () {
+    #[inline]
+    fn to_css<W>(&self, _: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
+    {
+        Ok(())
+    }
+}
+
+/// A writer tailored for serialising CSS.
+///
+/// Coupled with SequenceWriter, this allows callers to transparently handle
+/// things like comma-separated values etc.
+pub struct CssWriter<'w, W: 'w> {
+    inner: &'w mut W,
+    prefix: Option<&'static str>,
+}
+
+impl<'w, W> CssWriter<'w, W>
+where
+    W: Write,
+{
+    /// Creates a new `CssWriter`.
+    #[inline]
+    pub fn new(inner: &'w mut W) -> Self {
+        Self {
+            inner,
+            prefix: Some(""),
         }
     }
 }
 
-/// Convenience wrapper to serialise CSS values separated by a given string.
-pub struct SequenceWriter<'a, W> {
-    writer: TrackedWriter<W>,
-    separator: &'a str,
-}
-
-impl<'a, W> SequenceWriter<'a, W>
+impl<'w, W> Write for CssWriter<'w, W>
 where
     W: Write,
 {
+    #[inline]
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        if s.is_empty() {
+            return Ok(());
+        }
+        if let Some(prefix) = self.prefix.take() {
+            // We are going to write things, but first we need to write
+            // the prefix that was set by `SequenceWriter::item`.
+            if !prefix.is_empty() {
+                self.inner.write_str(prefix)?;
+            }
+        }
+        self.inner.write_str(s)
+    }
+
+    #[inline]
+    fn write_char(&mut self, c: char) -> fmt::Result {
+        if let Some(prefix) = self.prefix.take() {
+            // See comment in `write_str`.
+            if !prefix.is_empty() {
+                self.inner.write_str(prefix)?;
+            }
+        }
+        self.inner.write_char(c)
+    }
+}
+
+/// Convenience wrapper to serialise CSS values separated by a given string.
+pub struct SequenceWriter<'a, 'b: 'a, W: 'b> {
+    inner: &'a mut CssWriter<'b, W>,
+    separator: &'static str,
+}
+
+impl<'a, 'b, W> SequenceWriter<'a, 'b, W>
+where
+    W: Write + 'b,
+{
     /// Create a new sequence writer.
     #[inline]
-    pub fn new(writer: W, separator: &'a str) -> Self {
-        SequenceWriter {
-            writer: TrackedWriter::new(writer),
-            separator: separator,
+    pub fn new(inner: &'a mut CssWriter<'b, W>, separator: &'static str) -> Self {
+        if inner.prefix.is_none() {
+            // See comment in `item`.
+            inner.prefix = Some("");
         }
+        Self { inner, separator }
+    }
+
+    #[inline]
+    fn write_item<F>(&mut self, f: F) -> fmt::Result
+    where
+        F: FnOnce(&mut CssWriter<'b, W>) -> fmt::Result,
+    {
+        // Separate non-generic functions so that this code is not repeated
+        // in every monomorphization with a different type `F` or `W`.
+        // https://github.com/servo/servo/issues/26713
+        fn before(
+            prefix: &mut Option<&'static str>,
+            separator: &'static str,
+        ) -> Option<&'static str> {
+            let old_prefix = *prefix;
+            if old_prefix.is_none() {
+                // If there is no prefix in the inner writer, a previous
+                // call to this method produced output, which means we need
+                // to write the separator next time we produce output again.
+                *prefix = Some(separator);
+            }
+            old_prefix
+        }
+        fn after(
+            old_prefix: Option<&'static str>,
+            prefix: &mut Option<&'static str>,
+            separator: &'static str,
+        ) {
+            match (old_prefix, *prefix) {
+                (_, None) => {
+                    // This call produced output and cleaned up after itself.
+                },
+                (None, Some(p)) => {
+                    // Some previous call to `item` produced output,
+                    // but this one did not, prefix should be the same as
+                    // the one we set.
+                    debug_assert_eq!(separator, p);
+                    // We clean up here even though it's not necessary just
+                    // to be able to do all these assertion checks.
+                    *prefix = None;
+                },
+                (Some(old), Some(new)) => {
+                    // No previous call to `item` produced output, and this one
+                    // either.
+                    debug_assert_eq!(old, new);
+                },
+            }
+        }
+
+        let old_prefix = before(&mut self.inner.prefix, self.separator);
+        f(self.inner)?;
+        after(old_prefix, &mut self.inner.prefix, self.separator);
+        Ok(())
     }
 
     /// Serialises a CSS value, writing any separator as necessary.
@@ -118,89 +266,16 @@ where
     where
         T: ToCss,
     {
-        if self.writer.has_written {
-            item.to_css(&mut PrefixedWriter::new(&mut self.writer, self.separator))
-        } else {
-            item.to_css(&mut self.writer)
-        }
-    }
-}
-
-struct TrackedWriter<W> {
-    writer: W,
-    has_written: bool,
-}
-
-impl<W> TrackedWriter<W>
-where
-    W: Write,
-{
-    #[inline]
-    fn new(writer: W) -> Self {
-        TrackedWriter {
-            writer: writer,
-            has_written: false,
-        }
-    }
-}
-
-impl<W> Write for TrackedWriter<W>
-where
-    W: Write,
-{
-    #[inline]
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        if !s.is_empty() {
-            self.has_written = true;
-        }
-        self.writer.write_str(s)
+        self.write_item(|inner| item.to_css(inner))
     }
 
+    /// Writes a string as-is (i.e. not escaped or wrapped in quotes)
+    /// with any separator as necessary.
+    ///
+    /// See SequenceWriter::item.
     #[inline]
-    fn write_char(&mut self, c: char) -> fmt::Result {
-        self.has_written = true;
-        self.writer.write_char(c)
-    }
-}
-
-struct PrefixedWriter<'a, W> {
-    writer: W,
-    prefix: Option<&'a str>,
-}
-
-impl<'a, W> PrefixedWriter<'a, W>
-where
-    W: Write,
-{
-    #[inline]
-    fn new(writer: W, prefix: &'a str) -> Self {
-        PrefixedWriter {
-            writer: writer,
-            prefix: Some(prefix),
-        }
-    }
-}
-
-impl<'a, W> Write for PrefixedWriter<'a, W>
-where
-    W: Write,
-{
-    #[inline]
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        if !s.is_empty() {
-            if let Some(prefix) = self.prefix.take() {
-                self.writer.write_str(prefix)?;
-            }
-        }
-        self.writer.write_str(s)
-    }
-
-    #[inline]
-    fn write_char(&mut self, c: char) -> fmt::Result {
-        if let Some(prefix) = self.prefix.take() {
-            self.writer.write_str(prefix)?;
-        }
-        self.writer.write_char(c)
+    pub fn raw_item(&mut self, item: &str) -> fmt::Result {
+        self.write_item(|inner| inner.write_str(item))
     }
 }
 
@@ -251,7 +326,7 @@ impl Separator for Comma {
         parse_one: F,
     ) -> Result<Vec<T>, ParseError<'i, E>>
     where
-        F: for<'tt> FnMut(&mut Parser<'i, 'tt>) -> Result<T, ParseError<'i, E>>
+        F: for<'tt> FnMut(&mut Parser<'i, 'tt>) -> Result<T, ParseError<'i, E>>,
     {
         input.parse_comma_separated(parse_one)
     }
@@ -267,16 +342,16 @@ impl Separator for Space {
         mut parse_one: F,
     ) -> Result<Vec<T>, ParseError<'i, E>>
     where
-        F: for<'tt> FnMut(&mut Parser<'i, 'tt>) -> Result<T, ParseError<'i, E>>
+        F: for<'tt> FnMut(&mut Parser<'i, 'tt>) -> Result<T, ParseError<'i, E>>,
     {
-        input.skip_whitespace();  // Unnecessary for correctness, but may help try() rewind less.
+        input.skip_whitespace(); // Unnecessary for correctness, but may help try() rewind less.
         let mut results = vec![parse_one(input)?];
         loop {
-            input.skip_whitespace();  // Unnecessary for correctness, but may help try() rewind less.
+            input.skip_whitespace(); // Unnecessary for correctness, but may help try() rewind less.
             if let Ok(item) = input.try(&mut parse_one) {
                 results.push(item);
             } else {
-                return Ok(results)
+                return Ok(results);
             }
         }
     }
@@ -292,18 +367,19 @@ impl Separator for CommaWithSpace {
         mut parse_one: F,
     ) -> Result<Vec<T>, ParseError<'i, E>>
     where
-        F: for<'tt> FnMut(&mut Parser<'i, 'tt>) -> Result<T, ParseError<'i, E>>
+        F: for<'tt> FnMut(&mut Parser<'i, 'tt>) -> Result<T, ParseError<'i, E>>,
     {
-        input.skip_whitespace();  // Unnecessary for correctness, but may help try() rewind less.
+        input.skip_whitespace(); // Unnecessary for correctness, but may help try() rewind less.
         let mut results = vec![parse_one(input)?];
         loop {
-            input.skip_whitespace();  // Unnecessary for correctness, but may help try() rewind less.
+            input.skip_whitespace(); // Unnecessary for correctness, but may help try() rewind less.
+            let comma_location = input.current_source_location();
             let comma = input.try(|i| i.expect_comma()).is_ok();
-            input.skip_whitespace();  // Unnecessary for correctness, but may help try() rewind less.
+            input.skip_whitespace(); // Unnecessary for correctness, but may help try() rewind less.
             if let Ok(item) = input.try(&mut parse_one) {
                 results.push(item);
             } else if comma {
-                return Err(BasicParseError::UnexpectedToken(Token::Comma).into());
+                return Err(comma_location.new_unexpected_token_error(Token::Comma));
             } else {
                 break;
             }
@@ -323,8 +399,14 @@ impl OneOrMoreSeparated for UnicodeRange {
     type S = Comma;
 }
 
-impl<T> ToCss for Vec<T> where T: ToCss + OneOrMoreSeparated {
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: Write {
+impl<T> ToCss for Vec<T>
+where
+    T: ToCss + OneOrMoreSeparated,
+{
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
+    {
         let mut iter = self.iter();
         iter.next().unwrap().to_css(dest)?;
         for item in iter {
@@ -335,16 +417,35 @@ impl<T> ToCss for Vec<T> where T: ToCss + OneOrMoreSeparated {
     }
 }
 
-impl<T> ToCss for Box<T> where T: ?Sized + ToCss {
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result
-        where W: Write,
+impl<T> ToCss for Box<T>
+where
+    T: ?Sized + ToCss,
+{
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
+    {
+        (**self).to_css(dest)
+    }
+}
+
+impl<T> ToCss for Arc<T>
+where
+    T: ?Sized + ToCss,
+{
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
     {
         (**self).to_css(dest)
     }
 }
 
 impl ToCss for Au {
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: Write {
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
+    {
         self.to_f64_px().to_css(dest)?;
         dest.write_str("px")
     }
@@ -353,7 +454,10 @@ impl ToCss for Au {
 macro_rules! impl_to_css_for_predefined_type {
     ($name: ty) => {
         impl<'a> ToCss for $name {
-            fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: Write {
+            fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+            where
+                W: Write,
+            {
                 ::cssparser::ToCss::to_css(self, dest)
             }
         }
@@ -361,6 +465,7 @@ macro_rules! impl_to_css_for_predefined_type {
 }
 
 impl_to_css_for_predefined_type!(f32);
+impl_to_css_for_predefined_type!(i8);
 impl_to_css_for_predefined_type!(i32);
 impl_to_css_for_predefined_type!(u16);
 impl_to_css_for_predefined_type!(u32);
@@ -369,115 +474,70 @@ impl_to_css_for_predefined_type!(::cssparser::RGBA);
 impl_to_css_for_predefined_type!(::cssparser::Color);
 impl_to_css_for_predefined_type!(::cssparser::UnicodeRange);
 
-#[macro_export]
+/// Define an enum type with unit variants that each correspond to a CSS keyword.
 macro_rules! define_css_keyword_enum {
-    ($name: ident: values { $( $css: expr => $variant: ident),+, }
-                   aliases { $( $alias: expr => $alias_variant: ident ),+, }) => {
-        __define_css_keyword_enum__add_optional_traits!($name [ $( $css => $variant ),+ ]
-                                                              [ $( $alias => $alias_variant ),+ ]);
-    };
-    ($name: ident: values { $( $css: expr => $variant: ident),+, }
-                   aliases { $( $alias: expr => $alias_variant: ident ),* }) => {
-        __define_css_keyword_enum__add_optional_traits!($name [ $( $css => $variant ),+ ]
-                                                              [ $( $alias => $alias_variant ),* ]);
-    };
-    ($name: ident: values { $( $css: expr => $variant: ident),+ }
-                   aliases { $( $alias: expr => $alias_variant: ident ),+, }) => {
-        __define_css_keyword_enum__add_optional_traits!($name [ $( $css => $variant ),+ ]
-                                                              [ $( $alias => $alias_variant ),+ ]);
-    };
-    ($name: ident: values { $( $css: expr => $variant: ident),+ }
-                   aliases { $( $alias: expr => $alias_variant: ident ),* }) => {
-        __define_css_keyword_enum__add_optional_traits!($name [ $( $css => $variant ),+ ]
-                                                              [ $( $alias => $alias_variant ),* ]);
-    };
-    ($name: ident: $( $css: expr => $variant: ident ),+,) => {
-        __define_css_keyword_enum__add_optional_traits!($name [ $( $css => $variant ),+ ] []);
-    };
-    ($name: ident: $( $css: expr => $variant: ident ),+) => {
-        __define_css_keyword_enum__add_optional_traits!($name [ $( $css => $variant ),+ ] []);
-    };
-}
-
-#[cfg(feature = "servo")]
-#[macro_export]
-macro_rules! __define_css_keyword_enum__add_optional_traits {
-    ($name: ident [ $( $css: expr => $variant: ident ),+ ]
-                  [ $( $alias: expr => $alias_variant: ident),* ]) => {
-        __define_css_keyword_enum__actual! {
-            $name [ Deserialize, Serialize, HeapSizeOf ]
-                  [ $( $css => $variant ),+ ]
-                  [ $( $alias => $alias_variant ),* ]
-        }
-    };
-}
-
-#[cfg(not(feature = "servo"))]
-#[macro_export]
-macro_rules! __define_css_keyword_enum__add_optional_traits {
-    ($name: ident [ $( $css: expr => $variant: ident ),+ ]
-                  [ $( $alias: expr => $alias_variant: ident),* ]) => {
-        __define_css_keyword_enum__actual! {
-            $name [ MallocSizeOf ]
-                  [ $( $css => $variant ),+ ]
-                  [ $( $alias => $alias_variant ),* ]
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! __define_css_keyword_enum__actual {
-    ($name: ident [ $( $derived_trait: ident),* ]
-                  [ $( $css: expr => $variant: ident ),+ ]
-                  [ $( $alias: expr => $alias_variant: ident ),* ]) => {
-        #[allow(non_camel_case_types, missing_docs)]
-        #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq$(, $derived_trait )* )]
+    (pub enum $name:ident { $($variant:ident = $css:expr,)+ }) => {
+        #[allow(missing_docs)]
+        #[cfg_attr(feature = "servo", derive(Deserialize, Serialize))]
+        #[derive(Clone, Copy, Debug, Eq, Hash, MallocSizeOf, PartialEq, ToShmem)]
         pub enum $name {
-            $( $variant ),+
+            $($variant),+
         }
 
         impl $name {
             /// Parse this property from a CSS input stream.
             pub fn parse<'i, 't>(input: &mut ::cssparser::Parser<'i, 't>)
                                  -> Result<$name, $crate::ParseError<'i>> {
-                let ident = input.expect_ident()?;
-                Self::from_ident(&ident)
-                    .map_err(|()| ::cssparser::ParseError::Basic(
-                        ::cssparser::BasicParseError::UnexpectedToken(
-                            ::cssparser::Token::Ident(ident.clone()))))
+                use cssparser::Token;
+                let location = input.current_source_location();
+                match *input.next()? {
+                    Token::Ident(ref ident) => {
+                        Self::from_ident(ident).map_err(|()| {
+                            location.new_unexpected_token_error(
+                                Token::Ident(ident.clone()),
+                            )
+                        })
+                    }
+                    ref token => {
+                        Err(location.new_unexpected_token_error(token.clone()))
+                    }
+                }
             }
 
             /// Parse this property from an already-tokenized identifier.
             pub fn from_ident(ident: &str) -> Result<$name, ()> {
                 match_ignore_ascii_case! { ident,
-                                           $( $css => Ok($name::$variant), )+
-                                           $( $alias => Ok($name::$alias_variant), )*
-                                           _ => Err(())
+                    $($css => Ok($name::$variant),)+
+                    _ => Err(())
                 }
             }
         }
 
-        impl ToCss for $name {
-            fn to_css<W>(&self, dest: &mut W) -> ::std::fmt::Result
-                where W: ::std::fmt::Write
+        impl $crate::ToCss for $name {
+            fn to_css<W>(
+                &self,
+                dest: &mut $crate::CssWriter<W>,
+            ) -> ::std::fmt::Result
+            where
+                W: ::std::fmt::Write,
             {
                 match *self {
-                    $( $name::$variant => dest.write_str($css) ),+
+                    $( $name::$variant => ::std::fmt::Write::write_str(dest, $css) ),+
                 }
             }
         }
-    }
+    };
 }
 
 /// Helper types for the handling of specified values.
 pub mod specified {
-    use ParsingMode;
+    use crate::ParsingMode;
 
     /// Whether to allow negative lengths or not.
     #[repr(u8)]
-    #[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-    #[cfg_attr(feature = "servo", derive(HeapSizeOf))]
-    #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd)]
+    #[derive(
+        Clone, Copy, Debug, Deserialize, Eq, MallocSizeOf, PartialEq, PartialOrd, Serialize, ToShmem,
+    )]
     pub enum AllowedNumericType {
         /// Allow all kind of numeric values.
         All,

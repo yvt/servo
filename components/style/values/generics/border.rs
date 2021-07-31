@@ -1,109 +1,183 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! Generic types for CSS values related to borders.
 
-use std::fmt;
-use style_traits::ToCss;
-use values::generics::rect::Rect;
-use values::generics::size::Size;
+use crate::values::generics::rect::Rect;
+use crate::values::generics::size::Size2D;
+use crate::Zero;
+use std::fmt::{self, Write};
+use style_traits::{CssWriter, ToCss};
 
 /// A generic value for a single side of a `border-image-width` property.
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
-#[derive(Clone, Copy, Debug, PartialEq, ToComputedValue, ToCss)]
-pub enum BorderImageSideWidth<LengthOrPercentage, Number> {
-    /// `<length-or-percentage>`
-    Length(LengthOrPercentage),
+#[derive(
+    Animate,
+    Clone,
+    ComputeSquaredDistance,
+    Copy,
+    Debug,
+    MallocSizeOf,
+    Parse,
+    PartialEq,
+    SpecifiedValueInfo,
+    ToAnimatedValue,
+    ToAnimatedZero,
+    ToComputedValue,
+    ToCss,
+    ToResolvedValue,
+    ToShmem,
+)]
+#[repr(C, u8)]
+pub enum GenericBorderImageSideWidth<LP, N> {
     /// `<number>`
-    Number(Number),
+    ///
+    /// NOTE: Numbers need to be before length-percentagess, in order to parse
+    /// them first, since `0` should be a number, not the `0px` length.
+    Number(N),
+    /// `<length-or-percentage>`
+    LengthPercentage(LP),
     /// `auto`
     Auto,
 }
 
+pub use self::GenericBorderImageSideWidth as BorderImageSideWidth;
+
 /// A generic value for the `border-image-slice` property.
-#[derive(Clone, Copy, Debug, PartialEq, ToComputedValue)]
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
-pub struct BorderImageSlice<NumberOrPercentage> {
+#[derive(
+    Animate,
+    Clone,
+    ComputeSquaredDistance,
+    Copy,
+    Debug,
+    MallocSizeOf,
+    PartialEq,
+    SpecifiedValueInfo,
+    ToAnimatedValue,
+    ToAnimatedZero,
+    ToComputedValue,
+    ToCss,
+    ToResolvedValue,
+    ToShmem,
+)]
+#[repr(C)]
+pub struct GenericBorderImageSlice<NumberOrPercentage> {
     /// The offsets.
+    #[css(field_bound)]
     pub offsets: Rect<NumberOrPercentage>,
     /// Whether to fill the middle part.
+    #[animation(constant)]
+    #[css(represents_keyword)]
     pub fill: bool,
 }
 
+pub use self::GenericBorderImageSlice as BorderImageSlice;
+
 /// A generic value for the `border-*-radius` longhand properties.
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
-#[derive(Animate, Clone, ComputeSquaredDistance, Copy, Debug)]
-#[derive(PartialEq, ToComputedValue, ToCss)]
-pub struct BorderCornerRadius<L>(pub Size<L>);
+#[derive(
+    Animate,
+    Clone,
+    ComputeSquaredDistance,
+    Copy,
+    Debug,
+    MallocSizeOf,
+    PartialEq,
+    SpecifiedValueInfo,
+    ToAnimatedValue,
+    ToAnimatedZero,
+    ToComputedValue,
+    ToCss,
+    ToResolvedValue,
+    ToShmem,
+)]
+#[repr(C)]
+pub struct GenericBorderCornerRadius<L>(
+    #[css(field_bound)]
+    #[shmem(field_bound)]
+    pub Size2D<L>,
+);
+
+pub use self::GenericBorderCornerRadius as BorderCornerRadius;
 
 impl<L> BorderCornerRadius<L> {
     /// Trivially create a `BorderCornerRadius`.
     pub fn new(w: L, h: L) -> Self {
-        BorderCornerRadius(Size::new(w, h))
+        BorderCornerRadius(Size2D::new(w, h))
+    }
+}
+
+impl<L: Zero> Zero for BorderCornerRadius<L> {
+    fn zero() -> Self {
+        BorderCornerRadius(Size2D::zero())
+    }
+
+    fn is_zero(&self) -> bool {
+        self.0.is_zero()
     }
 }
 
 /// A generic value for the `border-spacing` property.
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
-#[derive(Animate, Clone, ComputeSquaredDistance, Copy, Debug)]
-#[derive(PartialEq, ToAnimatedValue, ToComputedValue, ToCss)]
-pub struct BorderSpacing<L>(pub Size<L>);
+#[derive(
+    Animate,
+    Clone,
+    ComputeSquaredDistance,
+    Copy,
+    Debug,
+    MallocSizeOf,
+    PartialEq,
+    SpecifiedValueInfo,
+    ToAnimatedValue,
+    ToAnimatedZero,
+    ToComputedValue,
+    ToCss,
+    ToResolvedValue,
+    ToShmem,
+)]
+#[repr(transparent)]
+pub struct BorderSpacing<L>(
+    #[css(field_bound)]
+    #[shmem(field_bound)]
+    pub Size2D<L>,
+);
 
 impl<L> BorderSpacing<L> {
     /// Trivially create a `BorderCornerRadius`.
     pub fn new(w: L, h: L) -> Self {
-        BorderSpacing(Size::new(w, h))
+        BorderSpacing(Size2D::new(w, h))
     }
 }
 
 /// A generic value for `border-radius`, `outline-radius` and `inset()`.
 ///
-/// https://drafts.csswg.org/css-backgrounds-3/#border-radius
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
-#[derive(Animate, Clone, ComputeSquaredDistance, Copy, Debug)]
-#[derive(PartialEq, ToComputedValue)]
-pub struct BorderRadius<LengthOrPercentage> {
+/// <https://drafts.csswg.org/css-backgrounds-3/#border-radius>
+#[derive(
+    Animate,
+    Clone,
+    ComputeSquaredDistance,
+    Copy,
+    Debug,
+    MallocSizeOf,
+    PartialEq,
+    SpecifiedValueInfo,
+    ToAnimatedValue,
+    ToComputedValue,
+    ToResolvedValue,
+    ToShmem,
+)]
+#[repr(C)]
+pub struct GenericBorderRadius<LengthPercentage> {
     /// The top left radius.
-    pub top_left: BorderCornerRadius<LengthOrPercentage>,
+    #[shmem(field_bound)]
+    pub top_left: GenericBorderCornerRadius<LengthPercentage>,
     /// The top right radius.
-    pub top_right: BorderCornerRadius<LengthOrPercentage>,
+    pub top_right: GenericBorderCornerRadius<LengthPercentage>,
     /// The bottom right radius.
-    pub bottom_right: BorderCornerRadius<LengthOrPercentage>,
+    pub bottom_right: GenericBorderCornerRadius<LengthPercentage>,
     /// The bottom left radius.
-    pub bottom_left: BorderCornerRadius<LengthOrPercentage>,
+    pub bottom_left: GenericBorderCornerRadius<LengthPercentage>,
 }
 
-impl<N> From<N> for BorderImageSlice<N>
-    where N: Clone,
-{
-    #[inline]
-    fn from(value: N) -> Self {
-        Self {
-            offsets: Rect::all(value),
-            fill: false,
-        }
-    }
-}
-
-impl<N> ToCss for BorderImageSlice<N>
-    where N: PartialEq + ToCss,
-{
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result
-        where W: fmt::Write
-    {
-        self.offsets.to_css(dest)?;
-        if self.fill {
-            dest.write_str(" fill")?;
-        }
-        Ok(())
-    }
-}
+pub use self::GenericBorderRadius as BorderRadius;
 
 impl<L> BorderRadius<L> {
     /// Returns a new `BorderRadius<L>`.
@@ -112,7 +186,7 @@ impl<L> BorderRadius<L> {
         tl: BorderCornerRadius<L>,
         tr: BorderCornerRadius<L>,
         br: BorderCornerRadius<L>,
-        bl: BorderCornerRadius<L>
+        bl: BorderCornerRadius<L>,
     ) -> Self {
         BorderRadius {
             top_left: tl,
@@ -121,18 +195,20 @@ impl<L> BorderRadius<L> {
             bottom_left: bl,
         }
     }
-}
 
-impl<L> BorderRadius<L>
-    where L: PartialEq + ToCss
-{
     /// Serialises two given rects following the syntax of the `border-radius``
     /// property.
-    pub fn serialize_rects<W>(widths: Rect<&L>, heights: Rect<&L>, dest: &mut W) -> fmt::Result
-        where W: fmt::Write,
+    pub fn serialize_rects<W>(
+        widths: Rect<&L>,
+        heights: Rect<&L>,
+        dest: &mut CssWriter<W>,
+    ) -> fmt::Result
+    where
+        L: PartialEq + ToCss,
+        W: Write,
     {
         widths.to_css(dest)?;
-        if widths.0 != heights.0 || widths.1 != heights.1 || widths.2 != heights.2 || widths.3 != heights.3 {
+        if widths != heights {
             dest.write_str(" / ")?;
             heights.to_css(dest)?;
         }
@@ -140,10 +216,32 @@ impl<L> BorderRadius<L>
     }
 }
 
+impl<L: Zero> Zero for BorderRadius<L> {
+    fn zero() -> Self {
+        Self::new(
+            BorderCornerRadius::<L>::zero(),
+            BorderCornerRadius::<L>::zero(),
+            BorderCornerRadius::<L>::zero(),
+            BorderCornerRadius::<L>::zero(),
+        )
+    }
+
+    fn is_zero(&self) -> bool {
+        self.top_left.is_zero() &&
+            self.top_right.is_zero() &&
+            self.bottom_right.is_zero() &&
+            self.bottom_left.is_zero()
+    }
+}
+
 impl<L> ToCss for BorderRadius<L>
-    where L: PartialEq + ToCss
+where
+    L: PartialEq + ToCss,
 {
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
+    {
         let BorderRadius {
             top_left: BorderCornerRadius(ref tl),
             top_right: BorderCornerRadius(ref tr),
@@ -151,8 +249,8 @@ impl<L> ToCss for BorderRadius<L>
             bottom_left: BorderCornerRadius(ref bl),
         } = *self;
 
-        let widths = Rect::new(&tl.0.width, &tr.0.width, &br.0.width, &bl.0.width);
-        let heights = Rect::new(&tl.0.height, &tr.0.height, &br.0.height, &bl.0.height);
+        let widths = Rect::new(&tl.width, &tr.width, &br.width, &bl.width);
+        let heights = Rect::new(&tl.height, &tr.height, &br.height, &bl.height);
 
         Self::serialize_rects(widths, heights, dest)
     }

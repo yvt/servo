@@ -1,19 +1,18 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! Machinery for [tasks](https://html.spec.whatwg.org/multipage/#concept-task).
 
 use std::fmt;
-use std::intrinsics;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 macro_rules! task {
     ($name:ident: move || $body:tt) => {{
         #[allow(non_camel_case_types)]
         struct $name<F>(F);
-        impl<F> ::task::TaskOnce for $name<F>
+        impl<F> crate::task::TaskOnce for $name<F>
         where
             F: ::std::ops::FnOnce() + Send,
         {
@@ -33,7 +32,7 @@ macro_rules! task {
 pub trait TaskOnce: Send {
     #[allow(unsafe_code)]
     fn name(&self) -> &'static str {
-        unsafe { intrinsics::type_name::<Self>() }
+        ::std::any::type_name::<Self>()
     }
 
     fn run_once(self);
@@ -59,15 +58,18 @@ where
     }
 }
 
-impl fmt::Debug for TaskBox {
+impl fmt::Debug for dyn TaskBox {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        fmt.debug_tuple(self.name()).field(&format_args!("...")).finish()
+        fmt.debug_tuple(self.name())
+            .field(&format_args!("..."))
+            .finish()
     }
 }
 
 /// Encapsulated state required to create cancellable tasks from non-script threads.
+#[derive(Clone)]
 pub struct TaskCanceller {
-    pub cancelled: Option<Arc<AtomicBool>>,
+    pub cancelled: Arc<AtomicBool>,
 }
 
 impl TaskCanceller {
@@ -86,7 +88,7 @@ impl TaskCanceller {
 
 /// A task that can be cancelled by toggling a shared flag.
 pub struct CancellableTask<T: TaskOnce> {
-    cancelled: Option<Arc<AtomicBool>>,
+    cancelled: Arc<AtomicBool>,
     inner: T,
 }
 
@@ -95,9 +97,7 @@ where
     T: TaskOnce,
 {
     fn is_cancelled(&self) -> bool {
-        self.cancelled.as_ref().map_or(false, |cancelled| {
-            cancelled.load(Ordering::SeqCst)
-        })
+        self.cancelled.load(Ordering::SeqCst)
     }
 }
 

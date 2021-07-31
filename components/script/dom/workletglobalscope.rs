@@ -1,46 +1,49 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use crate::dom::bindings::inheritance::Castable;
+use crate::dom::bindings::root::DomRoot;
+use crate::dom::globalscope::GlobalScope;
+use crate::dom::identityhub::Identities;
+use crate::dom::paintworkletglobalscope::PaintWorkletGlobalScope;
+use crate::dom::paintworkletglobalscope::PaintWorkletTask;
+use crate::dom::testworkletglobalscope::TestWorkletGlobalScope;
+use crate::dom::testworkletglobalscope::TestWorkletTask;
+use crate::dom::worklet::WorkletExecutor;
+use crate::script_module::ScriptFetchOptions;
+use crate::script_runtime::JSContext;
+use crate::script_thread::MainThreadScriptMsg;
+use crossbeam_channel::Sender;
 use devtools_traits::ScriptToDevtoolsControlMsg;
-use dom::bindings::inheritance::Castable;
-use dom::bindings::js::Root;
-use dom::globalscope::GlobalScope;
-use dom::paintworkletglobalscope::PaintWorkletGlobalScope;
-use dom::paintworkletglobalscope::PaintWorkletTask;
-use dom::testworkletglobalscope::TestWorkletGlobalScope;
-use dom::testworkletglobalscope::TestWorkletTask;
-use dom::worklet::WorkletExecutor;
 use dom_struct::dom_struct;
-use ipc_channel::ipc;
 use ipc_channel::ipc::IpcSender;
-use js::jsapi::JSContext;
 use js::jsval::UndefinedValue;
 use js::rust::Runtime;
 use msg::constellation_msg::PipelineId;
-use net_traits::ResourceThreads;
 use net_traits::image_cache::ImageCache;
+use net_traits::ResourceThreads;
+use parking_lot::Mutex;
 use profile_traits::mem;
 use profile_traits::time;
-use script_thread::MainThreadScriptMsg;
 use script_traits::{Painter, ScriptMsg};
 use script_traits::{ScriptToConstellationChan, TimerSchedulerMsg};
 use servo_atoms::Atom;
 use servo_url::ImmutableOrigin;
 use servo_url::MutableOrigin;
 use servo_url::ServoUrl;
+use std::borrow::Cow;
 use std::sync::Arc;
-use std::sync::mpsc::Sender;
 
 #[dom_struct]
-/// https://drafts.css-houdini.org/worklets/#workletglobalscope
+/// <https://drafts.css-houdini.org/worklets/#workletglobalscope>
 pub struct WorkletGlobalScope {
     /// The global for this worklet.
     globalscope: GlobalScope,
     /// The base URL for this worklet.
     base_url: ServoUrl,
     /// Sender back to the script thread
-    #[ignore_heap_size_of = "channels are hard"]
+    #[ignore_malloc_size_of = "channels are hard"]
     to_script_thread_sender: Sender<MainThreadScriptMsg>,
     /// Worklet task executor
     executor: WorkletExecutor,
@@ -54,8 +57,6 @@ impl WorkletGlobalScope {
         executor: WorkletExecutor,
         init: &WorkletGlobalScopeInit,
     ) -> Self {
-        // Any timer events fired on this global are ignored.
-        let (timer_event_chan, _) = ipc::channel().unwrap();
         let script_to_constellation_chan = ScriptToConstellationChan {
             sender: init.to_constellation_sender.clone(),
             pipeline_id,
@@ -69,9 +70,13 @@ impl WorkletGlobalScope {
                 script_to_constellation_chan,
                 init.scheduler_chan.clone(),
                 init.resource_threads.clone(),
-                timer_event_chan,
                 MutableOrigin::new(ImmutableOrigin::new_opaque()),
+                None,
                 Default::default(),
+                init.is_headless,
+                init.user_agent.clone(),
+                init.gpu_id_hub.clone(),
+                init.inherited_secure_context,
             ),
             base_url,
             to_script_thread_sender: init.to_script_thread_sender.clone(),
@@ -80,15 +85,20 @@ impl WorkletGlobalScope {
     }
 
     /// Get the JS context.
-    pub fn get_cx(&self) -> *mut JSContext {
+    pub fn get_cx(&self) -> JSContext {
         self.globalscope.get_cx()
     }
 
     /// Evaluate a JS script in this global.
     pub fn evaluate_js(&self, script: &str) -> bool {
-        debug!("Evaluating JS.");
-        rooted!(in (self.globalscope.get_cx()) let mut rval = UndefinedValue());
-        self.globalscope.evaluate_js_on_global_with_result(&*script, rval.handle_mut())
+        debug!("Evaluating Dom in a worklet.");
+        rooted!(in (*self.globalscope.get_cx()) let mut rval = UndefinedValue());
+        self.globalscope.evaluate_js_on_global_with_result(
+            &*script,
+            rval.handle_mut(),
+            ScriptFetchOptions::default_classic_script(&self.globalscope),
+            self.globalscope.api_base_url(),
+        )
     }
 
     /// Register a paint worklet to the script thread.
@@ -96,7 +106,7 @@ impl WorkletGlobalScope {
         &self,
         name: Atom,
         properties: Vec<Atom>,
-        painter: Box<Painter>,
+        painter: Box<dyn Painter>,
     ) {
         self.to_script_thread_sender
             .send(MainThreadScriptMsg::RegisterPaintWorklet {
@@ -151,11 +161,19 @@ pub struct WorkletGlobalScopeInit {
     /// Message to send to the scheduler
     pub scheduler_chan: IpcSender<TimerSchedulerMsg>,
     /// The image cache
-    pub image_cache: Arc<ImageCache>,
+    pub image_cache: Arc<dyn ImageCache>,
+    /// True if in headless mode
+    pub is_headless: bool,
+    /// An optional string allowing the user agent to be set for testing
+    pub user_agent: Cow<'static, str>,
+    /// Identity manager for WebGPU resources
+    pub gpu_id_hub: Arc<Mutex<Identities>>,
+    /// Is considered secure
+    pub inherited_secure_context: Option<bool>,
 }
 
-/// https://drafts.css-houdini.org/worklets/#worklet-global-scope-type
-#[derive(Clone, Copy, Debug, HeapSizeOf, JSTraceable)]
+/// <https://drafts.css-houdini.org/worklets/#worklet-global-scope-type>
+#[derive(Clone, Copy, Debug, JSTraceable, MallocSizeOf)]
 pub enum WorkletGlobalScopeType {
     /// A servo-specific testing worklet
     Test,
@@ -165,19 +183,29 @@ pub enum WorkletGlobalScopeType {
 
 impl WorkletGlobalScopeType {
     /// Create a new heap-allocated `WorkletGlobalScope`.
-    pub fn new(&self,
-               runtime: &Runtime,
-               pipeline_id: PipelineId,
-               base_url: ServoUrl,
-               executor: WorkletExecutor,
-               init: &WorkletGlobalScopeInit)
-               -> Root<WorkletGlobalScope>
-    {
+    pub fn new(
+        &self,
+        runtime: &Runtime,
+        pipeline_id: PipelineId,
+        base_url: ServoUrl,
+        executor: WorkletExecutor,
+        init: &WorkletGlobalScopeInit,
+    ) -> DomRoot<WorkletGlobalScope> {
         match *self {
-            WorkletGlobalScopeType::Test =>
-                Root::upcast(TestWorkletGlobalScope::new(runtime, pipeline_id, base_url, executor, init)),
-            WorkletGlobalScopeType::Paint =>
-                Root::upcast(PaintWorkletGlobalScope::new(runtime, pipeline_id, base_url, executor, init)),
+            WorkletGlobalScopeType::Test => DomRoot::upcast(TestWorkletGlobalScope::new(
+                runtime,
+                pipeline_id,
+                base_url,
+                executor,
+                init,
+            )),
+            WorkletGlobalScopeType::Paint => DomRoot::upcast(PaintWorkletGlobalScope::new(
+                runtime,
+                pipeline_id,
+                base_url,
+                executor,
+                init,
+            )),
         }
     }
 }

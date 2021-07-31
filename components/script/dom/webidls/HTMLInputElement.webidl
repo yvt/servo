@@ -1,10 +1,12 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // https://html.spec.whatwg.org/multipage/#htmlinputelement
-[HTMLConstructor]
+[Exposed=Window]
 interface HTMLInputElement : HTMLElement {
+  [HTMLConstructor] constructor();
+
   [CEReactions]
            attribute DOMString accept;
   [CEReactions]
@@ -37,7 +39,7 @@ interface HTMLInputElement : HTMLElement {
            attribute boolean indeterminate;
   // [CEReactions]
   //          attribute DOMString inputMode;
-  // readonly attribute HTMLElement? list;
+  readonly attribute HTMLElement? list;
   [CEReactions]
            attribute DOMString max;
   [CEReactions, SetterThrows]
@@ -61,49 +63,54 @@ interface HTMLInputElement : HTMLElement {
   [CEReactions, SetterThrows]
            attribute unsigned long size;
   [CEReactions]
-           attribute DOMString src;
+           attribute USVString src;
   [CEReactions]
            attribute DOMString step;
   [CEReactions]
            attribute DOMString type;
   [CEReactions]
            attribute DOMString defaultValue;
-  [CEReactions, TreatNullAs=EmptyString, SetterThrows]
-           attribute DOMString value;
-  //          attribute Date? valueAsDate;
-  //          attribute unrestricted double valueAsNumber;
-  //          attribute double valueLow;
-  //          attribute double valueHigh;
+  [CEReactions, SetterThrows]
+           attribute [TreatNullAs=EmptyString] DOMString value;
+  [SetterThrows]
+           attribute object? valueAsDate;
+  [SetterThrows]
+           attribute unrestricted double valueAsNumber;
   // [CEReactions]
   //          attribute unsigned long width;
 
-  //void stepUp(optional long n = 1);
-  //void stepDown(optional long n = 1);
+  [Throws] void stepUp(optional long n = 1);
+  [Throws] void stepDown(optional long n = 1);
 
-  //readonly attribute boolean willValidate;
-  //readonly attribute ValidityState validity;
-  //readonly attribute DOMString validationMessage;
-  //boolean checkValidity();
-  //boolean reportValidity();
-  //void setCustomValidity(DOMString error);
+  readonly attribute boolean willValidate;
+  readonly attribute ValidityState validity;
+  readonly attribute DOMString validationMessage;
+  boolean checkValidity();
+  boolean reportValidity();
+  void setCustomValidity(DOMString error);
 
-  readonly attribute NodeList labels;
+  readonly attribute NodeList? labels;
 
-  //void select();
-           attribute unsigned long selectionStart;
-           attribute unsigned long selectionEnd;
-           attribute DOMString selectionDirection;
-  //void setRangeText(DOMString replacement);
-  //void setRangeText(DOMString replacement, unsigned long start, unsigned long end,
-  //                  optional SelectionMode selectionMode = "preserve");
-  void setSelectionRange(unsigned long start, unsigned long end, optional DOMString direction);
+  void select();
+  [SetterThrows]
+           attribute unsigned long? selectionStart;
+  [SetterThrows]
+           attribute unsigned long? selectionEnd;
+  [SetterThrows]
+           attribute DOMString? selectionDirection;
+  [Throws]
+           void setRangeText(DOMString replacement);
+  [Throws]
+           void setRangeText(DOMString replacement, unsigned long start, unsigned long end,
+                             optional SelectionMode selectionMode = "preserve");
+  [Throws]
+           void setSelectionRange(unsigned long start, unsigned long end, optional DOMString direction);
 
   // also has obsolete members
 
   // Select with file-system paths for testing purpose
   [Pref="dom.testing.htmlinputelement.select_files.enabled"]
   void selectFiles(sequence<DOMString> path);
-
 };
 
 // https://html.spec.whatwg.org/multipage/#HTMLInputElement-partial

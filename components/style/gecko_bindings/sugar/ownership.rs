@@ -1,9 +1,10 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! Helpers for different FFI pointer kinds that Gecko's FFI layer uses.
 
+use crate::gecko_bindings::structs::root::mozilla::detail::CopyablePtr;
 use servo_arc::{Arc, RawOffsetArc};
 use std::marker::PhantomData;
 use std::mem::{forget, transmute};
@@ -11,7 +12,7 @@ use std::ops::{Deref, DerefMut};
 use std::ptr;
 
 /// Indicates that a given Servo type has a corresponding Gecko FFI type.
-pub unsafe trait HasFFI : Sized + 'static {
+pub unsafe trait HasFFI: Sized + 'static {
     /// The corresponding Gecko type that this rust type represents.
     ///
     /// See the examples in `components/style/gecko/conversions.rs`.
@@ -20,7 +21,7 @@ pub unsafe trait HasFFI : Sized + 'static {
 
 /// Indicates that a given Servo type has the same layout as the corresponding
 /// `HasFFI::FFIType` type.
-pub unsafe trait HasSimpleFFI : HasFFI {
+pub unsafe trait HasSimpleFFI: HasFFI {
     #[inline]
     /// Given a Servo-side reference, converts it to an FFI-safe reference which
     /// can be passed to Gecko.
@@ -57,13 +58,21 @@ pub unsafe trait HasSimpleFFI : HasFFI {
 
 /// Indicates that the given Servo type is passed over FFI
 /// as a Box
-pub unsafe trait HasBoxFFI : HasSimpleFFI {
+pub unsafe trait HasBoxFFI: HasSimpleFFI {
     #[inline]
     /// Converts a borrowed Arc to a borrowed FFI reference.
     ///
     /// &Arc<ServoType> -> &GeckoType
     fn into_ffi(self: Box<Self>) -> Owned<Self::FFIType> {
         unsafe { transmute(self) }
+    }
+
+    /// Drops an owned FFI pointer. This conceptually takes the
+    /// Owned<Self::FFIType>, except it's a bit of a paint to do that without
+    /// much benefit.
+    #[inline]
+    unsafe fn drop_ffi(ptr: *mut Self::FFIType) {
+        let _ = Box::from_raw(ptr as *mut Self);
     }
 }
 
@@ -73,7 +82,7 @@ pub unsafe trait HasBoxFFI : HasSimpleFFI {
 /// and Borrowed.
 ///
 /// In this case, the FFIType is the rough equivalent of ArcInner<Self>.
-pub unsafe trait HasArcFFI : HasFFI {
+pub unsafe trait HasArcFFI: HasFFI {
     // these methods can't be on Borrowed because it leads to an unspecified
     // impl parameter
     /// Artificially increments the refcount of a (possibly null) borrowed Arc
@@ -109,10 +118,7 @@ pub unsafe trait HasArcFFI : HasFFI {
     ///
     /// &GeckoType -> &Arc<ServoType>
     fn as_arc<'a>(ptr: &'a &Self::FFIType) -> &'a RawOffsetArc<Self> {
-        debug_assert!(!(ptr as *const _).is_null());
-        unsafe {
-            transmute::<&&Self::FFIType, &RawOffsetArc<Self>>(ptr)
-        }
+        unsafe { transmute::<&&Self::FFIType, &RawOffsetArc<Self>>(ptr) }
     }
 
     #[inline]
@@ -120,9 +126,7 @@ pub unsafe trait HasArcFFI : HasFFI {
     ///
     /// &Arc<ServoType> -> &GeckoType
     fn arc_as_borrowed<'a>(arc: &'a RawOffsetArc<Self>) -> &'a &Self::FFIType {
-        unsafe {
-            transmute::<&RawOffsetArc<Self>, &&Self::FFIType>(arc)
-        }
+        unsafe { transmute::<&RawOffsetArc<Self>, &&Self::FFIType>(arc) }
     }
 
     #[inline]
@@ -140,12 +144,12 @@ pub unsafe trait HasArcFFI : HasFFI {
     }
 }
 
-#[repr(C)]
 /// Gecko-FFI-safe Arc (T is an ArcInner).
 ///
 /// This can be null.
 ///
 /// Leaks on drop. Please don't drop this.
+#[repr(C)]
 pub struct Strong<GeckoType> {
     ptr: *const GeckoType,
     _marker: PhantomData<GeckoType>,
@@ -166,7 +170,8 @@ impl<GeckoType> Strong<GeckoType> {
     ///
     /// Strong<GeckoType> -> Arc<ServoType>
     pub fn into_arc<ServoType>(self) -> RawOffsetArc<ServoType>
-        where ServoType: HasArcFFI<FFIType = GeckoType>,
+    where
+        ServoType: HasArcFFI<FFIType = GeckoType>,
     {
         self.into_arc_opt().unwrap()
     }
@@ -178,7 +183,8 @@ impl<GeckoType> Strong<GeckoType> {
     ///
     /// Strong<GeckoType> -> Arc<ServoType>
     pub fn into_arc_opt<ServoType>(self) -> Option<RawOffsetArc<ServoType>>
-        where ServoType: HasArcFFI<FFIType = GeckoType>,
+    where
+        ServoType: HasArcFFI<FFIType = GeckoType>,
     {
         if self.is_null() {
             None
@@ -195,7 +201,8 @@ impl<GeckoType> Strong<GeckoType> {
     ///
     /// Strong<GeckoType> -> Arc<ServoType>
     pub fn as_arc_opt<ServoType>(&self) -> Option<&RawOffsetArc<ServoType>>
-        where ServoType: HasArcFFI<FFIType = GeckoType>,
+    where
+        ServoType: HasArcFFI<FFIType = GeckoType>,
     {
         if self.is_null() {
             None
@@ -270,13 +277,6 @@ pub struct Owned<GeckoType> {
 }
 
 impl<GeckoType> Owned<GeckoType> {
-    /// Gets this `Owned` type as a `Box<ServoType>`.
-    pub fn into_box<ServoType>(self) -> Box<ServoType>
-        where ServoType: HasBoxFFI<FFIType = GeckoType>,
-    {
-        unsafe { transmute(self) }
-    }
-
     /// Converts this instance to a (non-null) instance of `OwnedOrNull`.
     pub fn maybe(self) -> OwnedOrNull<GeckoType> {
         unsafe { transmute(self) }
@@ -306,30 +306,19 @@ pub struct OwnedOrNull<GeckoType> {
 }
 
 impl<GeckoType> OwnedOrNull<GeckoType> {
+    /// Returns a null pointer.
+    #[inline]
+    pub fn null() -> Self {
+        Self {
+            ptr: ptr::null_mut(),
+            _marker: PhantomData,
+        }
+    }
+
     /// Returns whether this pointer is null.
     #[inline]
     pub fn is_null(&self) -> bool {
         self.ptr.is_null()
-    }
-
-    /// Returns an owned pointer if this is non-null, and `None` otherwise.
-    pub fn into_box_opt<ServoType>(self) -> Option<Box<ServoType>>
-        where ServoType: HasBoxFFI<FFIType = GeckoType>,
-    {
-        if self.is_null() {
-            None
-        } else {
-            Some(unsafe { transmute(self) })
-        }
-    }
-
-    /// Returns an `Owned<GeckoType>` if non-null, `None` otherwise.
-    pub fn into_owned_opt(self) -> Option<Owned<GeckoType>> {
-        if self.is_null() {
-            None
-        } else {
-            Some(unsafe { transmute(self) })
-        }
     }
 
     /// Gets a immutable reference to the underlying Gecko type, or `None` if
@@ -342,5 +331,18 @@ impl<GeckoType> OwnedOrNull<GeckoType> {
     /// null.
     pub fn borrow_mut(&self) -> Option<&mut GeckoType> {
         unsafe { transmute(self) }
+    }
+}
+
+impl<T> Deref for CopyablePtr<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        &self.mPtr
+    }
+}
+
+impl<T> DerefMut for CopyablePtr<T> {
+    fn deref_mut<'a>(&'a mut self) -> &'a mut T {
+        &mut self.mPtr
     }
 }

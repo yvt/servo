@@ -1,292 +1,297 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! Generic types that share their serialization implementations
 //! for both specified and computed values.
 
-use counter_style::{Symbols, parse_counter_style_name};
-use cssparser::Parser;
-use parser::{Parse, ParserContext};
-use std::fmt;
-use style_traits::{Comma, OneOrMoreSeparated, ParseError, StyleParseError, ToCss};
 use super::CustomIdent;
+use crate::counter_style::{parse_counter_style_name, Symbols};
+use crate::parser::{Parse, ParserContext};
+use crate::Zero;
+use cssparser::Parser;
+use std::ops::Add;
+use style_traits::{KeywordsCollectFn, ParseError, SpecifiedValueInfo, StyleParseErrorKind};
 
 pub mod background;
 pub mod basic_shape;
 pub mod border;
 #[path = "box.rs"]
 pub mod box_;
+pub mod calc;
+pub mod color;
+pub mod column;
+pub mod counters;
+pub mod easing;
 pub mod effects;
 pub mod flex;
-#[cfg(feature = "gecko")]
-pub mod gecko;
+pub mod font;
 pub mod grid;
 pub mod image;
+pub mod length;
+pub mod motion;
+pub mod page;
 pub mod position;
+pub mod ratio;
 pub mod rect;
 pub mod size;
 pub mod svg;
 pub mod text;
 pub mod transform;
+pub mod ui;
+pub mod url;
 
-// https://drafts.csswg.org/css-counter-styles/#typedef-symbols-type
-define_css_keyword_enum! { SymbolsType:
-    "cyclic" => Cyclic,
-    "numeric" => Numeric,
-    "alphabetic" => Alphabetic,
-    "symbolic" => Symbolic,
-    "fixed" => Fixed,
-}
-add_impls_for_keyword_enum!(SymbolsType);
-
-#[cfg(feature = "gecko")]
-impl SymbolsType {
-    /// Convert symbols type to their corresponding Gecko values.
-    pub fn to_gecko_keyword(self) -> u8 {
-        use gecko_bindings::structs;
-        match self {
-            SymbolsType::Cyclic => structs::NS_STYLE_COUNTER_SYSTEM_CYCLIC as u8,
-            SymbolsType::Numeric => structs::NS_STYLE_COUNTER_SYSTEM_NUMERIC as u8,
-            SymbolsType::Alphabetic => structs::NS_STYLE_COUNTER_SYSTEM_ALPHABETIC as u8,
-            SymbolsType::Symbolic => structs::NS_STYLE_COUNTER_SYSTEM_SYMBOLIC as u8,
-            SymbolsType::Fixed => structs::NS_STYLE_COUNTER_SYSTEM_FIXED as u8,
-        }
-    }
-
-    /// Convert Gecko value to symbol type.
-    pub fn from_gecko_keyword(gecko_value: u32) -> SymbolsType {
-        use gecko_bindings::structs;
-        match gecko_value {
-            structs::NS_STYLE_COUNTER_SYSTEM_CYCLIC => SymbolsType::Cyclic,
-            structs::NS_STYLE_COUNTER_SYSTEM_NUMERIC => SymbolsType::Numeric,
-            structs::NS_STYLE_COUNTER_SYSTEM_ALPHABETIC => SymbolsType::Alphabetic,
-            structs::NS_STYLE_COUNTER_SYSTEM_SYMBOLIC => SymbolsType::Symbolic,
-            structs::NS_STYLE_COUNTER_SYSTEM_FIXED => SymbolsType::Fixed,
-            x => panic!("Unexpected value for symbol type {}", x)
-        }
-    }
+/// https://drafts.csswg.org/css-counter-styles/#typedef-symbols-type
+#[allow(missing_docs)]
+#[cfg_attr(feature = "servo", derive(Deserialize, Serialize))]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    MallocSizeOf,
+    Parse,
+    PartialEq,
+    ToComputedValue,
+    ToCss,
+    ToResolvedValue,
+    ToShmem,
+)]
+#[repr(u8)]
+pub enum SymbolsType {
+    Cyclic,
+    Numeric,
+    Alphabetic,
+    Symbolic,
+    Fixed,
 }
 
-/// https://drafts.csswg.org/css-counter-styles/#typedef-counter-style
+/// <https://drafts.csswg.org/css-counter-styles/#typedef-counter-style>
 ///
-/// Since wherever <counter-style> is used, 'none' is a valid value as
-/// well, we combine them into one type to make code simpler.
+/// Note that 'none' is not a valid name.
 #[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[derive(Clone, Debug, Eq, PartialEq, ToComputedValue, ToCss)]
-pub enum CounterStyleOrNone {
-    /// `none`
-    None,
+#[derive(Clone, Debug, Eq, PartialEq, ToComputedValue, ToCss, ToResolvedValue, ToShmem)]
+#[repr(u8)]
+pub enum CounterStyle {
     /// `<counter-style-name>`
     Name(CustomIdent),
     /// `symbols()`
     #[css(function)]
-    Symbols(SymbolsType, Symbols),
+    Symbols(#[css(skip_if = "is_symbolic")] SymbolsType, Symbols),
 }
 
-impl CounterStyleOrNone {
+#[inline]
+fn is_symbolic(symbols_type: &SymbolsType) -> bool {
+    *symbols_type == SymbolsType::Symbolic
+}
+
+impl CounterStyle {
     /// disc value
     pub fn disc() -> Self {
-        CounterStyleOrNone::Name(CustomIdent(atom!("disc")))
+        CounterStyle::Name(CustomIdent(atom!("disc")))
     }
 
     /// decimal value
     pub fn decimal() -> Self {
-        CounterStyleOrNone::Name(CustomIdent(atom!("decimal")))
+        CounterStyle::Name(CustomIdent(atom!("decimal")))
     }
 }
 
-
-impl Parse for CounterStyleOrNone {
-    fn parse<'i, 't>(context: &ParserContext, input: &mut Parser<'i, 't>) -> Result<Self, ParseError<'i>> {
-        if let Ok(name) = input.try(|i| parse_counter_style_name(i)) {
-            return Ok(CounterStyleOrNone::Name(name));
+impl Parse for CounterStyle {
+    fn parse<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Self, ParseError<'i>> {
+        if let Ok(name) = input.try_parse(|i| parse_counter_style_name(i)) {
+            return Ok(CounterStyle::Name(name));
         }
-        if input.try(|i| i.expect_ident_matching("none")).is_ok() {
-            return Ok(CounterStyleOrNone::None);
-        }
-        if input.try(|i| i.expect_function_matching("symbols")).is_ok() {
-            return input.parse_nested_block(|input| {
-                let symbols_type = input.try(|i| SymbolsType::parse(i))
-                    .unwrap_or(SymbolsType::Symbolic);
-                let symbols = Symbols::parse(context, input)?;
-                // There must be at least two symbols for alphabetic or
-                // numeric system.
-                if (symbols_type == SymbolsType::Alphabetic ||
-                    symbols_type == SymbolsType::Numeric) && symbols.0.len() < 2 {
-                    return Err(StyleParseError::UnspecifiedError.into());
-                }
-                // Identifier is not allowed in symbols() function.
-                if symbols.0.iter().any(|sym| !sym.is_allowed_in_symbols()) {
-                    return Err(StyleParseError::UnspecifiedError.into());
-                }
-                Ok(CounterStyleOrNone::Symbols(symbols_type, symbols))
-            });
-        }
-        Err(StyleParseError::UnspecifiedError.into())
-    }
-}
-
-/// A settings tag, defined by a four-character tag and a setting value
-///
-/// For font-feature-settings, this is a tag and an integer,
-/// for font-variation-settings this is a tag and a float
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
-#[derive(Clone, Debug, Eq, PartialEq, ToComputedValue)]
-pub struct FontSettingTag<T> {
-    /// A four-character tag, packed into a u32 (one byte per character)
-    pub tag: u32,
-    /// The value
-    pub value: T,
-}
-
-impl<T> OneOrMoreSeparated for FontSettingTag<T> {
-    type S = Comma;
-}
-
-impl<T: ToCss> ToCss for FontSettingTag<T> {
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
-        use byteorder::{BigEndian, ByteOrder};
-        use std::str;
-
-        let mut raw = [0u8; 4];
-        BigEndian::write_u32(&mut raw, self.tag);
-        str::from_utf8(&raw).unwrap_or_default().to_css(dest)?;
-
-        self.value.to_css(dest)
-    }
-}
-
-impl<T: Parse> Parse for FontSettingTag<T> {
-    /// https://www.w3.org/TR/css-fonts-3/#propdef-font-feature-settings
-    /// https://drafts.csswg.org/css-fonts-4/#low-level-font-variation-
-    /// settings-control-the-font-variation-settings-property
-    /// <string> [ on | off | <integer> ]
-    /// <string> <number>
-    fn parse<'i, 't>(context: &ParserContext, input: &mut Parser<'i, 't>) -> Result<Self, ParseError<'i>> {
-        use byteorder::{ReadBytesExt, BigEndian};
-        use std::io::Cursor;
-
-        let u_tag;
-        {
-            let tag = input.expect_string()?;
-
-            // allowed strings of length 4 containing chars: <U+20, U+7E>
-            if tag.len() != 4 ||
-               tag.chars().any(|c| c < ' ' || c > '~')
+        input.expect_function_matching("symbols")?;
+        input.parse_nested_block(|input| {
+            let symbols_type = input
+                .try_parse(SymbolsType::parse)
+                .unwrap_or(SymbolsType::Symbolic);
+            let symbols = Symbols::parse(context, input)?;
+            // There must be at least two symbols for alphabetic or
+            // numeric system.
+            if (symbols_type == SymbolsType::Alphabetic || symbols_type == SymbolsType::Numeric) &&
+                symbols.0.len() < 2
             {
-                return Err(StyleParseError::UnspecifiedError.into())
+                return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError));
             }
-
-            let mut raw = Cursor::new(tag.as_bytes());
-            u_tag = raw.read_u32::<BigEndian>().unwrap();
-        }
-
-        Ok(FontSettingTag { tag: u_tag, value: T::parse(context, input)? })
+            // Identifier is not allowed in symbols() function.
+            if symbols.0.iter().any(|sym| !sym.is_allowed_in_symbols()) {
+                return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError));
+            }
+            Ok(CounterStyle::Symbols(symbols_type, symbols))
+        })
     }
 }
 
-
-/// A font settings value for font-variation-settings or font-feature-settings
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
-#[derive(Clone, Debug, Eq, PartialEq, ToComputedValue, ToCss)]
-pub enum FontSettings<T> {
-    /// No settings (default)
-    Normal,
-    /// Set of settings
-    Tag(Vec<FontSettingTag<T>>)
-}
-
-impl<T: Parse> Parse for FontSettings<T> {
-    /// https://www.w3.org/TR/css-fonts-3/#propdef-font-feature-settings
-    fn parse<'i, 't>(context: &ParserContext, input: &mut Parser<'i, 't>) -> Result<Self, ParseError<'i>> {
-        if input.try(|i| i.expect_ident_matching("normal")).is_ok() {
-            return Ok(FontSettings::Normal);
-        }
-        Vec::parse(context, input).map(FontSettings::Tag)
-    }
-}
-
-/// An integer that can also parse "on" and "off",
-/// for font-feature-settings
-///
-/// Do not use this type anywhere except within FontSettings
-/// because it serializes with the preceding space
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ToComputedValue)]
-pub struct FontSettingTagInt(pub u32);
-
-/// A number value to be used for font-variation-settings
-///
-/// Do not use this type anywhere except within FontSettings
-/// because it serializes with the preceding space
-#[cfg_attr(feature = "gecko", derive(Animate, ComputeSquaredDistance, MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
-#[derive(Clone, Debug, PartialEq, ToComputedValue)]
-pub struct FontSettingTagFloat(pub f32);
-
-impl ToCss for FontSettingTagInt {
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
-        match self.0 {
-            1 => Ok(()),
-            0 => dest.write_str(" off"),
-            x => {
-                dest.write_char(' ')?;
-                x.to_css(dest)
+impl SpecifiedValueInfo for CounterStyle {
+    fn collect_completion_keywords(f: KeywordsCollectFn) {
+        // XXX The best approach for implementing this is probably
+        // having a CounterStyleName type wrapping CustomIdent, and
+        // put the predefined list for that type in counter_style mod.
+        // But that's a non-trivial change itself, so we use a simpler
+        // approach here.
+        macro_rules! predefined {
+            ($($name:expr,)+) => {
+                f(&["symbols", $($name,)+]);
             }
         }
-    }
-}
-
-impl Parse for FontSettingTagInt {
-    fn parse<'i, 't>(_context: &ParserContext, input: &mut Parser<'i, 't>) -> Result<Self, ParseError<'i>> {
-        if let Ok(value) = input.try(|input| input.expect_integer()) {
-            // handle integer, throw if it is negative
-            if value >= 0 {
-                Ok(FontSettingTagInt(value as u32))
-            } else {
-                Err(StyleParseError::UnspecifiedError.into())
-            }
-        } else if let Ok(_) = input.try(|input| input.expect_ident_matching("on")) {
-            // on is an alias for '1'
-            Ok(FontSettingTagInt(1))
-        } else if let Ok(_) = input.try(|input| input.expect_ident_matching("off")) {
-            // off is an alias for '0'
-            Ok(FontSettingTagInt(0))
-        } else {
-            // empty value is an alias for '1'
-            Ok(FontSettingTagInt(1))
-        }
-    }
-}
-
-
-impl Parse for FontSettingTagFloat {
-    fn parse<'i, 't>(_: &ParserContext, input: &mut Parser<'i, 't>) -> Result<Self, ParseError<'i>> {
-        input.expect_number().map(FontSettingTagFloat).map_err(|e| e.into())
-    }
-}
-
-impl ToCss for FontSettingTagFloat {
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
-        dest.write_str(" ")?;
-        self.0.to_css(dest)
+        include!("../../counter_style/predefined.rs");
     }
 }
 
 /// A wrapper of Non-negative values.
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(Deserialize, HeapSizeOf, Serialize))]
-#[derive(Animate, Clone, ComputeSquaredDistance, Copy, Debug)]
-#[derive(PartialEq, PartialOrd, ToAnimatedZero, ToComputedValue, ToCss)]
+#[cfg_attr(feature = "servo", derive(Deserialize, Serialize))]
+#[derive(
+    Animate,
+    Clone,
+    ComputeSquaredDistance,
+    Copy,
+    Debug,
+    Hash,
+    MallocSizeOf,
+    PartialEq,
+    PartialOrd,
+    SpecifiedValueInfo,
+    ToAnimatedZero,
+    ToComputedValue,
+    ToCss,
+    ToResolvedValue,
+    ToShmem,
+)]
+#[repr(transparent)]
 pub struct NonNegative<T>(pub T);
 
+impl<T: Add<Output = T>> Add<NonNegative<T>> for NonNegative<T> {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        NonNegative(self.0 + other.0)
+    }
+}
+
+impl<T: Zero> Zero for NonNegative<T> {
+    fn is_zero(&self) -> bool {
+        self.0.is_zero()
+    }
+
+    fn zero() -> Self {
+        NonNegative(T::zero())
+    }
+}
+
 /// A wrapper of greater-than-or-equal-to-one values.
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(Deserialize, HeapSizeOf, Serialize))]
-#[derive(Animate, Clone, ComputeSquaredDistance, Copy, Debug)]
-#[derive(PartialEq, PartialOrd, ToAnimatedZero, ToComputedValue, ToCss)]
+#[cfg_attr(feature = "servo", derive(Deserialize, Serialize))]
+#[derive(
+    Animate,
+    Clone,
+    ComputeSquaredDistance,
+    Copy,
+    Debug,
+    MallocSizeOf,
+    PartialEq,
+    PartialOrd,
+    SpecifiedValueInfo,
+    ToAnimatedZero,
+    ToComputedValue,
+    ToCss,
+    ToResolvedValue,
+    ToShmem,
+)]
 pub struct GreaterThanOrEqualToOne<T>(pub T);
+
+/// A wrapper of values between zero and one.
+#[cfg_attr(feature = "servo", derive(Deserialize, Serialize))]
+#[derive(
+    Animate,
+    Clone,
+    ComputeSquaredDistance,
+    Copy,
+    Debug,
+    Hash,
+    MallocSizeOf,
+    PartialEq,
+    PartialOrd,
+    SpecifiedValueInfo,
+    ToAnimatedZero,
+    ToComputedValue,
+    ToCss,
+    ToResolvedValue,
+    ToShmem,
+)]
+#[repr(transparent)]
+pub struct ZeroToOne<T>(pub T);
+
+/// A clip rect for clip and image-region
+#[allow(missing_docs)]
+#[derive(
+    Clone,
+    ComputeSquaredDistance,
+    Copy,
+    Debug,
+    MallocSizeOf,
+    PartialEq,
+    SpecifiedValueInfo,
+    ToAnimatedValue,
+    ToAnimatedZero,
+    ToComputedValue,
+    ToCss,
+    ToResolvedValue,
+    ToShmem,
+)]
+#[css(function = "rect", comma)]
+#[repr(C)]
+pub struct GenericClipRect<LengthOrAuto> {
+    pub top: LengthOrAuto,
+    pub right: LengthOrAuto,
+    pub bottom: LengthOrAuto,
+    pub left: LengthOrAuto,
+}
+
+pub use self::GenericClipRect as ClipRect;
+
+/// Either a clip-rect or `auto`.
+#[allow(missing_docs)]
+#[derive(
+    Animate,
+    Clone,
+    ComputeSquaredDistance,
+    Copy,
+    Debug,
+    MallocSizeOf,
+    Parse,
+    PartialEq,
+    SpecifiedValueInfo,
+    ToAnimatedValue,
+    ToAnimatedZero,
+    ToComputedValue,
+    ToCss,
+    ToResolvedValue,
+    ToShmem,
+)]
+#[repr(C, u8)]
+pub enum GenericClipRectOrAuto<R> {
+    Auto,
+    Rect(R),
+}
+
+pub use self::GenericClipRectOrAuto as ClipRectOrAuto;
+
+impl<L> ClipRectOrAuto<L> {
+    /// Returns the `auto` value.
+    #[inline]
+    pub fn auto() -> Self {
+        ClipRectOrAuto::Auto
+    }
+
+    /// Returns whether this value is the `auto` value.
+    #[inline]
+    pub fn is_auto(&self) -> bool {
+        matches!(*self, ClipRectOrAuto::Auto)
+    }
+}
+
+pub use page::PageSize;

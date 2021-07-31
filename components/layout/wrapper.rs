@@ -1,6 +1,6 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! A safe wrapper for DOM nodes that prevents layout from mutating the DOM, from letting DOM nodes
 //! escape, and from generally doing anything that it isn't supposed to. This is accomplished via
@@ -12,7 +12,7 @@
 //!
 //! 1. Layout is not allowed to mutate the DOM.
 //!
-//! 2. Layout is not allowed to see anything with `LayoutJS` in the name, because it could hang
+//! 2. Layout is not allowed to see anything with `LayoutDom` in the name, because it could hang
 //!    onto these objects and cause use-after-free.
 //!
 //! When implementing wrapper functions, be careful that you do not touch the borrow flags, or you
@@ -30,46 +30,55 @@
 
 #![allow(unsafe_code)]
 
+use crate::data::{LayoutData, LayoutDataFlags, StyleAndLayoutData};
 use atomic_refcell::{AtomicRef, AtomicRefMut};
-use data::{LayoutData, LayoutDataFlags, StyleAndLayoutData};
+use script_layout_interface::wrapper_traits::GetStyleAndOpaqueLayoutData;
 use script_layout_interface::wrapper_traits::{ThreadSafeLayoutElement, ThreadSafeLayoutNode};
-use script_layout_interface::wrapper_traits::GetLayoutData;
-use style::computed_values::content::{self, ContentItem};
-use style::dom::{NodeInfo, TNode};
+use style::dom::{NodeInfo, TElement, TNode};
 use style::selector_parser::RestyleDamage;
+use style::values::computed::counters::ContentItem;
+use style::values::generics::counters::Content;
 
-pub trait LayoutNodeLayoutData {
-    /// Similar to borrow_data*, but returns the full PersistentLayoutData rather
-    /// than only the style::data::ElementData.
-    fn borrow_layout_data(&self) -> Option<AtomicRef<LayoutData>>;
-    fn mutate_layout_data(&self) -> Option<AtomicRefMut<LayoutData>>;
+pub trait LayoutNodeLayoutData<'dom> {
+    fn borrow_layout_data(self) -> Option<AtomicRef<'dom, LayoutData>>;
+    fn mutate_layout_data(self) -> Option<AtomicRefMut<'dom, LayoutData>>;
     fn flow_debug_id(self) -> usize;
 }
 
-impl<T: GetLayoutData> LayoutNodeLayoutData for T {
-    fn borrow_layout_data(&self) -> Option<AtomicRef<LayoutData>> {
-        self.get_raw_data().map(|d| d.layout_data.borrow())
+impl<'dom, T> LayoutNodeLayoutData<'dom> for T
+where
+    T: GetStyleAndOpaqueLayoutData<'dom>,
+{
+    fn borrow_layout_data(self) -> Option<AtomicRef<'dom, LayoutData>> {
+        self.get_style_and_layout_data()
+            .map(|d| d.layout_data.borrow())
     }
 
-    fn mutate_layout_data(&self) -> Option<AtomicRefMut<LayoutData>> {
-        self.get_raw_data().map(|d| d.layout_data.borrow_mut())
+    fn mutate_layout_data(self) -> Option<AtomicRefMut<'dom, LayoutData>> {
+        self.get_style_and_layout_data()
+            .map(|d| d.layout_data.borrow_mut())
     }
 
     fn flow_debug_id(self) -> usize {
-        self.borrow_layout_data().map_or(0, |d| d.flow_construction_result.debug_id())
+        self.borrow_layout_data()
+            .map_or(0, |d| d.flow_construction_result.debug_id())
     }
 }
 
-pub trait GetRawData {
-    fn get_raw_data(&self) -> Option<&StyleAndLayoutData>;
+pub trait GetStyleAndLayoutData<'dom> {
+    fn get_style_and_layout_data(self) -> Option<StyleAndLayoutData<'dom>>;
 }
 
-impl<T: GetLayoutData> GetRawData for T {
-    fn get_raw_data(&self) -> Option<&StyleAndLayoutData> {
-        self.get_style_and_layout_data().map(|opaque| {
-            let container = opaque.ptr.get() as *mut StyleAndLayoutData;
-            unsafe { &*container }
-        })
+impl<'dom, T> GetStyleAndLayoutData<'dom> for T
+where
+    T: GetStyleAndOpaqueLayoutData<'dom>,
+{
+    fn get_style_and_layout_data(self) -> Option<StyleAndLayoutData<'dom>> {
+        self.get_style_and_opaque_layout_data()
+            .map(|data| StyleAndLayoutData {
+                style_data: &data.style_data,
+                layout_data: data.generic_data.downcast_ref().unwrap(),
+            })
     }
 }
 
@@ -96,9 +105,12 @@ pub trait ThreadSafeLayoutNodeHelpers {
     fn restyle_damage(self) -> RestyleDamage;
 }
 
-impl<T: ThreadSafeLayoutNode> ThreadSafeLayoutNodeHelpers for T {
+impl<'dom, T> ThreadSafeLayoutNodeHelpers for T
+where
+    T: ThreadSafeLayoutNode<'dom>,
+{
     fn flags(self) -> LayoutDataFlags {
-            self.borrow_layout_data().as_ref().unwrap().flags
+        self.borrow_layout_data().as_ref().unwrap().flags
     }
 
     fn insert_flags(self, new_flags: LayoutDataFlags) {
@@ -113,15 +125,13 @@ impl<T: ThreadSafeLayoutNode> ThreadSafeLayoutNodeHelpers for T {
         if self.get_pseudo_element_type().is_replaced_content() {
             let style = self.as_element().unwrap().resolved_style();
 
-            return match style.as_ref().get_counters().content {
-                content::T::Items(ref value) if !value.is_empty() => {
-                    TextContent::GeneratedContent((*value).clone())
-                }
-                _ => TextContent::GeneratedContent(vec![]),
-            };
+            return TextContent::GeneratedContent(match style.as_ref().get_counters().content {
+                Content::Items(ref value) => value.to_vec(),
+                _ => vec![],
+            });
         }
 
-        return TextContent::Text(self.node_text_content());
+        TextContent::Text(self.node_text_content().into_owned().into_boxed_str())
     }
 
     fn restyle_damage(self) -> RestyleDamage {
@@ -138,9 +148,20 @@ impl<T: ThreadSafeLayoutNode> ThreadSafeLayoutNodeHelpers for T {
         }
 
         let damage = {
-            let data = node.get_raw_data().unwrap();
+            let data = match node.get_style_and_layout_data() {
+                Some(data) => data,
+                None => panic!(
+                    "could not get style and layout data for <{}>",
+                    node.as_element().unwrap().local_name()
+                ),
+            };
 
-            if !data.layout_data.borrow().flags.contains(::data::HAS_BEEN_TRAVERSED) {
+            if !data
+                .layout_data
+                .borrow()
+                .flags
+                .contains(crate::data::LayoutDataFlags::HAS_BEEN_TRAVERSED)
+            {
                 // We're reflowing a node that was styled for the first time and
                 // has never been visited by layout. Return rebuild_and_reflow,
                 // because that's what the code expects.
@@ -152,11 +173,10 @@ impl<T: ThreadSafeLayoutNode> ThreadSafeLayoutNodeHelpers for T {
 
         damage
     }
-
 }
 
 pub enum TextContent {
-    Text(String),
+    Text(Box<str>),
     GeneratedContent(Vec<ContentItem>),
 }
 

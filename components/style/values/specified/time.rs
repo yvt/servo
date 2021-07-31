@@ -1,24 +1,21 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! Specified time values.
 
-use cssparser::{Parser, Token, BasicParseError};
-use parser::{ParserContext, Parse};
-use std::ascii::AsciiExt;
-use std::fmt;
-use style_traits::{ToCss, ParseError, StyleParseError};
+use crate::parser::{Parse, ParserContext};
+use crate::values::computed::time::Time as ComputedTime;
+use crate::values::computed::{Context, ToComputedValue};
+use crate::values::specified::calc::CalcNode;
+use crate::values::CSSFloat;
+use cssparser::{Parser, Token};
+use std::fmt::{self, Write};
 use style_traits::values::specified::AllowedNumericType;
-use values::CSSFloat;
-use values::computed::{Context, ToComputedValue};
-use values::computed::time::Time as ComputedTime;
-use values::specified::calc::CalcNode;
+use style_traits::{CssWriter, ParseError, SpecifiedValueInfo, StyleParseErrorKind, ToCss};
 
 /// A time value according to CSS-VALUES § 6.2.
-#[derive(Clone, Copy, Debug, PartialEq)]
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+#[derive(Clone, Copy, Debug, MallocSizeOf, PartialEq, ToShmem)]
 pub struct Time {
     seconds: CSSFloat,
     unit: TimeUnit,
@@ -26,9 +23,7 @@ pub struct Time {
 }
 
 /// A time unit.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+#[derive(Clone, Copy, Debug, Eq, MallocSizeOf, PartialEq, ToShmem)]
 pub enum TimeUnit {
     /// `s`
     Second,
@@ -39,7 +34,11 @@ pub enum TimeUnit {
 impl Time {
     /// Returns a time value that represents `seconds` seconds.
     pub fn from_seconds(seconds: CSSFloat) -> Self {
-        Time { seconds, unit: TimeUnit::Second, was_calc: false }
+        Time {
+            seconds,
+            unit: TimeUnit::Second,
+            was_calc: false,
+        }
     }
 
     /// Returns `0s`.
@@ -53,24 +52,24 @@ impl Time {
     }
 
     /// Parses a time according to CSS-VALUES § 6.2.
-    pub fn parse_dimension(
-        value: CSSFloat,
-        unit: &str,
-        was_calc: bool
-    ) -> Result<Time, ()> {
+    pub fn parse_dimension(value: CSSFloat, unit: &str, was_calc: bool) -> Result<Time, ()> {
         let (seconds, unit) = match_ignore_ascii_case! { unit,
             "s" => (value, TimeUnit::Second),
             "ms" => (value / 1000.0, TimeUnit::Millisecond),
             _ => return Err(())
         };
 
-        Ok(Time { seconds, unit, was_calc })
+        Ok(Time {
+            seconds,
+            unit,
+            was_calc,
+        })
     }
 
     /// Returns a `Time` value from a CSS `calc()` expression.
     pub fn from_calc(seconds: CSSFloat) -> Self {
         Time {
-            seconds: seconds,
+            seconds,
             unit: TimeUnit::Second,
             was_calc: true,
         }
@@ -79,35 +78,46 @@ impl Time {
     fn parse_with_clamping_mode<'i, 't>(
         context: &ParserContext,
         input: &mut Parser<'i, 't>,
-        clamping_mode: AllowedNumericType
+        clamping_mode: AllowedNumericType,
     ) -> Result<Self, ParseError<'i>> {
-        use style_traits::PARSING_MODE_DEFAULT;
+        use style_traits::ParsingMode;
 
-        // FIXME: remove early returns when lifetimes are non-lexical
-        match input.next() {
+        let location = input.current_source_location();
+        match *input.next()? {
             // Note that we generally pass ParserContext to is_ok() to check
             // that the ParserMode of the ParserContext allows all numeric
             // values for SMIL regardless of clamping_mode, but in this Time
             // value case, the value does not animate for SMIL at all, so we use
-            // PARSING_MODE_DEFAULT directly.
-            Ok(&Token::Dimension { value, ref unit, .. }) if clamping_mode.is_ok(PARSING_MODE_DEFAULT, value) => {
-                return Time::parse_dimension(value, unit, /* from_calc = */ false)
-                    .map_err(|()| StyleParseError::UnspecifiedError.into())
-            }
-            Ok(&Token::Function(ref name)) if name.eq_ignore_ascii_case("calc") => {}
-            Ok(t) => return Err(BasicParseError::UnexpectedToken(t.clone()).into()),
-            Err(e) => return Err(e.into())
-        }
-        match input.parse_nested_block(|i| CalcNode::parse_time(context, i)) {
-            Ok(time) if clamping_mode.is_ok(PARSING_MODE_DEFAULT, time.seconds) => Ok(time),
-            _ => Err(StyleParseError::UnspecifiedError.into()),
+            // ParsingMode::DEFAULT directly.
+            Token::Dimension {
+                value, ref unit, ..
+            } if clamping_mode.is_ok(ParsingMode::DEFAULT, value) => {
+                Time::parse_dimension(value, unit, /* from_calc = */ false)
+                    .map_err(|()| location.new_custom_error(StyleParseErrorKind::UnspecifiedError))
+            },
+            Token::Function(ref name) => {
+                let function = CalcNode::math_function(name, location)?;
+                let time = CalcNode::parse_time(context, input, function)?;
+
+                // FIXME(emilio): Rejecting calc() at parse time is wrong,
+                // was_calc should probably be replaced by calc_clamping_mode or
+                // something like we do for numbers, or we should do the
+                // clamping here instead (simpler, but technically incorrect,
+                // though still more correct than this!).
+                if !clamping_mode.is_ok(ParsingMode::DEFAULT, time.seconds) {
+                    return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError));
+                }
+
+                Ok(time)
+            },
+            ref t => return Err(location.new_unexpected_token_error(t.clone())),
         }
     }
 
     /// Parses a non-negative time value.
     pub fn parse_non_negative<'i, 't>(
         context: &ParserContext,
-        input: &mut Parser<'i, 't>
+        input: &mut Parser<'i, 't>,
     ) -> Result<Self, ParseError<'i>> {
         Self::parse_with_clamping_mode(context, input, AllowedNumericType::NonNegative)
     }
@@ -130,15 +140,18 @@ impl ToComputedValue for Time {
 }
 
 impl Parse for Time {
-    fn parse<'i, 't>(context: &ParserContext, input: &mut Parser<'i, 't>) -> Result<Self, ParseError<'i>> {
+    fn parse<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Self, ParseError<'i>> {
         Self::parse_with_clamping_mode(context, input, AllowedNumericType::All)
     }
 }
 
 impl ToCss for Time {
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
     where
-        W: fmt::Write,
+        W: Write,
     {
         if self.was_calc {
             dest.write_str("calc(")?;
@@ -147,11 +160,11 @@ impl ToCss for Time {
             TimeUnit::Second => {
                 self.seconds.to_css(dest)?;
                 dest.write_str("s")?;
-            }
+            },
             TimeUnit::Millisecond => {
                 (self.seconds * 1000.).to_css(dest)?;
                 dest.write_str("ms")?;
-            }
+            },
         }
         if self.was_calc {
             dest.write_str(")")?;
@@ -159,3 +172,5 @@ impl ToCss for Time {
         Ok(())
     }
 }
+
+impl SpecifiedValueInfo for Time {}

@@ -1,160 +1,235 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! CSS handling for the specified value of
 //! [`image`][image]s
 //!
 //! [image]: https://drafts.csswg.org/css-images/#image-values
 
-use Atom;
-use cssparser::{Parser, Token, BasicParseError};
-use custom_properties::SpecifiedValue;
-use parser::{Parse, ParserContext};
-use selectors::parser::SelectorParseError;
+use crate::custom_properties::SpecifiedValue;
+use crate::parser::{Parse, ParserContext};
+use crate::stylesheets::CorsMode;
+use crate::values::generics::image::PaintWorklet;
+use crate::values::generics::image::{
+    self as generic, Circle, Ellipse, GradientCompatMode, ShapeExtent,
+};
+use crate::values::generics::position::Position as GenericPosition;
+use crate::values::generics::NonNegative;
+use crate::values::specified::position::{HorizontalPositionKeyword, VerticalPositionKeyword};
+use crate::values::specified::position::{Position, PositionComponent, Side};
+use crate::values::specified::url::SpecifiedImageUrl;
+use crate::values::specified::{
+    Angle, AngleOrPercentage, Color, Length, LengthPercentage, NonNegativeLength,
+    NonNegativeLengthPercentage, Resolution,
+};
+use crate::values::specified::{Number, NumberOrPercentage, Percentage};
+use crate::Atom;
+use cssparser::{Delimiter, Parser, Token};
+use selectors::parser::SelectorParseErrorKind;
 #[cfg(feature = "servo")]
 use servo_url::ServoUrl;
 use std::cmp::Ordering;
-use std::f32::consts::PI;
-use std::fmt;
-use style_traits::{ToCss, ParseError, StyleParseError};
-use values::{Either, None_};
-#[cfg(feature = "gecko")]
-use values::computed::{Context, Position as ComputedPosition, ToComputedValue};
-use values::generics::image::{Circle, CompatMode, Ellipse, ColorStop as GenericColorStop};
-use values::generics::image::{EndingShape as GenericEndingShape, Gradient as GenericGradient};
-use values::generics::image::{GradientItem as GenericGradientItem, GradientKind as GenericGradientKind};
-use values::generics::image::{Image as GenericImage, LineDirection as GenericsLineDirection};
-use values::generics::image::{MozImageRect as GenericMozImageRect, ShapeExtent};
-use values::generics::image::PaintWorklet;
-use values::generics::position::Position as GenericPosition;
-use values::specified::{Angle, Color, Length, LengthOrPercentage};
-use values::specified::{Number, NumberOrPercentage, Percentage, RGBAColor};
-use values::specified::position::{LegacyPosition, Position, PositionComponent, Side, X, Y};
-use values::specified::url::SpecifiedUrl;
-
-/// A specified image layer.
-pub type ImageLayer = Either<None_, Image>;
+use std::fmt::{self, Write};
+use style_traits::{CssType, CssWriter, KeywordsCollectFn, ParseError};
+use style_traits::{SpecifiedValueInfo, StyleParseErrorKind, ToCss};
 
 /// Specified values for an image according to CSS-IMAGES.
-/// https://drafts.csswg.org/css-images/#image-values
-pub type Image = GenericImage<Gradient, MozImageRect, SpecifiedUrl>;
+/// <https://drafts.csswg.org/css-images/#image-values>
+pub type Image =
+    generic::Image<Gradient, MozImageRect, SpecifiedImageUrl, Color, Percentage, Resolution>;
 
 /// Specified values for a CSS gradient.
-/// https://drafts.csswg.org/css-images/#gradients
-#[cfg(not(feature = "gecko"))]
-pub type Gradient = GenericGradient<
+/// <https://drafts.csswg.org/css-images/#gradients>
+pub type Gradient = generic::Gradient<
     LineDirection,
-    Length,
-    LengthOrPercentage,
-    Position,
-    RGBAColor,
-    Angle,
->;
-
-/// Specified values for a CSS gradient.
-/// https://drafts.csswg.org/css-images/#gradients
-#[cfg(feature = "gecko")]
-pub type Gradient = GenericGradient<
-    LineDirection,
-    Length,
-    LengthOrPercentage,
-    GradientPosition,
-    RGBAColor,
-    Angle,
->;
-
-/// A specified gradient kind.
-#[cfg(not(feature = "gecko"))]
-pub type GradientKind = GenericGradientKind<
-    LineDirection,
-    Length,
-    LengthOrPercentage,
+    LengthPercentage,
+    NonNegativeLength,
+    NonNegativeLengthPercentage,
     Position,
     Angle,
+    AngleOrPercentage,
+    Color,
 >;
 
-/// A specified gradient kind.
+/// Specified values for CSS cross-fade
+/// cross-fade( CrossFadeElement, ...)
+/// <https://drafts.csswg.org/css-images-4/#cross-fade-function>
+pub type CrossFade = generic::CrossFade<Image, Color, Percentage>;
+/// CrossFadeElement = percent? CrossFadeImage
+pub type CrossFadeElement = generic::CrossFadeElement<Image, Color, Percentage>;
+/// CrossFadeImage = image | color
+pub type CrossFadeImage = generic::CrossFadeImage<Image, Color>;
+/// A specified percentage or nothing.
+pub type PercentOrNone = generic::PercentOrNone<Percentage>;
+
+/// `image-set()`
+pub type ImageSet = generic::ImageSet<Image, Resolution>;
+
+/// Each of the arguments to `image-set()`
+pub type ImageSetItem = generic::ImageSetItem<Image, Resolution>;
+
+type LengthPercentageItemList = crate::OwnedSlice<generic::GradientItem<Color, LengthPercentage>>;
+
 #[cfg(feature = "gecko")]
-pub type GradientKind = GenericGradientKind<
-    LineDirection,
-    Length,
-    LengthOrPercentage,
-    GradientPosition,
-    Angle,
->;
+fn cross_fade_enabled() -> bool {
+    static_prefs::pref!("layout.css.cross-fade.enabled")
+}
+
+#[cfg(feature = "servo")]
+fn cross_fade_enabled() -> bool {
+    false
+}
+
+#[cfg(feature = "gecko")]
+fn image_set_enabled() -> bool {
+    static_prefs::pref!("layout.css.image-set.enabled")
+}
+
+#[cfg(feature = "servo")]
+fn image_set_enabled() -> bool {
+    false
+}
+
+impl SpecifiedValueInfo for Gradient {
+    const SUPPORTED_TYPES: u8 = CssType::GRADIENT;
+
+    fn collect_completion_keywords(f: KeywordsCollectFn) {
+        // This list here should keep sync with that in Gradient::parse.
+        f(&[
+            "linear-gradient",
+            "-webkit-linear-gradient",
+            "-moz-linear-gradient",
+            "repeating-linear-gradient",
+            "-webkit-repeating-linear-gradient",
+            "-moz-repeating-linear-gradient",
+            "radial-gradient",
+            "-webkit-radial-gradient",
+            "-moz-radial-gradient",
+            "repeating-radial-gradient",
+            "-webkit-repeating-radial-gradient",
+            "-moz-repeating-radial-gradient",
+            "-webkit-gradient",
+            "conic-gradient",
+            "repeating-conic-gradient",
+        ]);
+    }
+}
+
+// Need to manually implement as whether or not cross-fade shows up in
+// completions & etc is dependent on it being enabled.
+impl<Image, Color, Percentage> SpecifiedValueInfo for generic::CrossFade<Image, Color, Percentage> {
+    const SUPPORTED_TYPES: u8 = 0;
+
+    fn collect_completion_keywords(f: KeywordsCollectFn) {
+        if cross_fade_enabled() {
+            f(&["cross-fade"]);
+        }
+    }
+}
+
+impl<Image, Resolution> SpecifiedValueInfo for generic::ImageSet<Image, Resolution> {
+    const SUPPORTED_TYPES: u8 = 0;
+
+    fn collect_completion_keywords(f: KeywordsCollectFn) {
+        if image_set_enabled() {
+            f(&["image-set"]);
+        }
+    }
+}
 
 /// A specified gradient line direction.
-#[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
+///
+/// FIXME(emilio): This should be generic over Angle.
+#[derive(Clone, Debug, MallocSizeOf, PartialEq, ToShmem)]
 pub enum LineDirection {
     /// An angular direction.
     Angle(Angle),
     /// A horizontal direction.
-    Horizontal(X),
+    Horizontal(HorizontalPositionKeyword),
     /// A vertical direction.
-    Vertical(Y),
+    Vertical(VerticalPositionKeyword),
     /// A direction towards a corner of a box.
-    Corner(X, Y),
-    /// A Position and an Angle for legacy `-moz-` prefixed gradient.
-    /// `-moz-` prefixed linear gradient can contain both a position and an angle but it
-    /// uses legacy syntax for position. That means we can't specify both keyword and
-    /// length for each horizontal/vertical components.
-    #[cfg(feature = "gecko")]
-    MozPosition(Option<LegacyPosition>, Option<Angle>),
-}
-
-/// A binary enum to hold either Position or LegacyPosition.
-#[derive(Clone, Debug, MallocSizeOf, PartialEq, ToCss)]
-#[cfg(feature = "gecko")]
-pub enum GradientPosition {
-    /// 1, 2, 3, 4-valued <position>.
-    Modern(Position),
-    /// 1, 2-valued <position>.
-    Legacy(LegacyPosition),
+    Corner(HorizontalPositionKeyword, VerticalPositionKeyword),
 }
 
 /// A specified ending shape.
-pub type EndingShape = GenericEndingShape<Length, LengthOrPercentage>;
-
-/// A specified gradient item.
-pub type GradientItem = GenericGradientItem<RGBAColor, LengthOrPercentage>;
-
-/// A computed color stop.
-pub type ColorStop = GenericColorStop<RGBAColor, LengthOrPercentage>;
+pub type EndingShape = generic::EndingShape<NonNegativeLength, NonNegativeLengthPercentage>;
 
 /// Specified values for `moz-image-rect`
 /// -moz-image-rect(<uri>, top, right, bottom, left);
-pub type MozImageRect = GenericMozImageRect<NumberOrPercentage, SpecifiedUrl>;
+#[cfg(all(feature = "gecko", not(feature = "cbindgen")))]
+pub type MozImageRect = generic::GenericMozImageRect<NumberOrPercentage, SpecifiedImageUrl>;
+
+#[cfg(not(feature = "gecko"))]
+#[derive(
+    Clone,
+    Debug,
+    MallocSizeOf,
+    PartialEq,
+    SpecifiedValueInfo,
+    ToComputedValue,
+    ToCss,
+    ToResolvedValue,
+    ToShmem,
+)]
+/// Empty enum on non-Gecko
+pub enum MozImageRect {}
 
 impl Parse for Image {
-    #[cfg_attr(not(feature = "gecko"), allow(unused_mut))]
-    fn parse<'i, 't>(context: &ParserContext, input: &mut Parser<'i, 't>) -> Result<Image, ParseError<'i>> {
-        if let Ok(mut url) = input.try(|input| SpecifiedUrl::parse(context, input)) {
-            #[cfg(feature = "gecko")]
-            {
-                url.build_image_value();
-            }
-            return Ok(GenericImage::Url(url));
+    fn parse<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Image, ParseError<'i>> {
+        Image::parse_with_cors_mode(context, input, CorsMode::None, /* allow_none = */ true)
+    }
+}
+
+impl Image {
+    fn parse_with_cors_mode<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+        cors_mode: CorsMode,
+        allow_none: bool,
+    ) -> Result<Image, ParseError<'i>> {
+        if allow_none && input.try_parse(|i| i.expect_ident_matching("none")).is_ok() {
+            return Ok(generic::Image::None);
         }
-        if let Ok(gradient) = input.try(|i| Gradient::parse(context, i)) {
-            return Ok(GenericImage::Gradient(Box::new(gradient)));
-        }
-        #[cfg(feature = "servo")]
+        if let Ok(url) = input
+            .try_parse(|input| SpecifiedImageUrl::parse_with_cors_mode(context, input, cors_mode))
         {
-            if let Ok(paint_worklet) = input.try(|i| PaintWorklet::parse(context, i)) {
-                return Ok(GenericImage::PaintWorklet(paint_worklet));
+            return Ok(generic::Image::Url(url));
+        }
+        if let Ok(gradient) = input.try_parse(|i| Gradient::parse(context, i)) {
+            return Ok(generic::Image::Gradient(Box::new(gradient)));
+        }
+        if image_set_enabled() {
+            if let Ok(is) = input.try_parse(|input| ImageSet::parse(context, input, cors_mode)) {
+                return Ok(generic::Image::ImageSet(Box::new(is)));
             }
         }
-        if let Ok(mut image_rect) = input.try(|input| MozImageRect::parse(context, input)) {
-            #[cfg(feature = "gecko")]
+        if cross_fade_enabled() {
+            if let Ok(cf) = input.try_parse(|input| CrossFade::parse(context, input, cors_mode)) {
+                return Ok(generic::Image::CrossFade(Box::new(cf)));
+            }
+        }
+        #[cfg(feature = "servo-layout-2013")]
+        {
+            if let Ok(paint_worklet) = input.try_parse(|i| PaintWorklet::parse(context, i)) {
+                return Ok(generic::Image::PaintWorklet(paint_worklet));
+            }
+        }
+        #[cfg(feature = "gecko")]
+        {
+            if let Ok(image_rect) =
+                input.try_parse(|input| MozImageRect::parse(context, input, cors_mode))
             {
-                image_rect.url.build_image_value();
+                return Ok(generic::Image::Rect(Box::new(image_rect)));
             }
-            return Ok(GenericImage::Rect(Box::new(image_rect)));
+            Ok(generic::Image::Element(Image::parse_element(input)?))
         }
-        Ok(GenericImage::Element(Image::parse_element(input)?))
+        #[cfg(not(feature = "gecko"))]
+        Err(input.new_error_for_next_token())
     }
 }
 
@@ -163,110 +238,233 @@ impl Image {
     /// for insertion in the cascade.
     #[cfg(feature = "servo")]
     pub fn for_cascade(url: ServoUrl) -> Self {
-        GenericImage::Url(SpecifiedUrl::for_cascade(url))
+        use crate::values::CssUrl;
+        generic::Image::Url(CssUrl::for_cascade(url))
     }
 
     /// Parses a `-moz-element(# <element-id>)`.
+    #[cfg(feature = "gecko")]
     fn parse_element<'i, 't>(input: &mut Parser<'i, 't>) -> Result<Atom, ParseError<'i>> {
-        input.try(|i| i.expect_function_matching("-moz-element"))?;
-        input.parse_nested_block(|i| {
-            match *i.next()? {
-                Token::IDHash(ref id) => Ok(Atom::from(id.as_ref())),
-                ref t => Err(BasicParseError::UnexpectedToken(t.clone()).into()),
-            }
+        input.try_parse(|i| i.expect_function_matching("-moz-element"))?;
+        let location = input.current_source_location();
+        input.parse_nested_block(|i| match *i.next()? {
+            Token::IDHash(ref id) => Ok(Atom::from(id.as_ref())),
+            ref t => Err(location.new_unexpected_token_error(t.clone())),
         })
+    }
+
+    /// Provides an alternate method for parsing that associates the URL with
+    /// anonymous CORS headers.
+    pub fn parse_with_cors_anonymous<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Image, ParseError<'i>> {
+        Self::parse_with_cors_mode(
+            context,
+            input,
+            CorsMode::Anonymous,
+            /* allow_none = */ true,
+        )
+    }
+}
+
+impl CrossFade {
+    /// cross-fade() = cross-fade( <cf-image># )
+    fn parse<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+        cors_mode: CorsMode,
+    ) -> Result<Self, ParseError<'i>> {
+        input.expect_function_matching("cross-fade")?;
+        let elements = input.parse_nested_block(|input| {
+            input.parse_comma_separated(|input| CrossFadeElement::parse(context, input, cors_mode))
+        })?;
+        let elements = crate::OwnedSlice::from(elements);
+        Ok(Self { elements })
+    }
+}
+
+impl CrossFadeElement {
+    /// <cf-image> = <percentage>? && [ <image> | <color> ]
+    fn parse<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+        cors_mode: CorsMode,
+    ) -> Result<Self, ParseError<'i>> {
+        // Try and parse a leading percent sign.
+        let mut percent = PercentOrNone::parse_or_none(context, input);
+        // Parse the image
+        let image = CrossFadeImage::parse(context, input, cors_mode)?;
+        // Try and parse a trailing percent sign.
+        if percent == PercentOrNone::None {
+            percent = PercentOrNone::parse_or_none(context, input);
+        }
+        Ok(Self { percent, image })
+    }
+}
+
+impl CrossFadeImage {
+    fn parse<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+        cors_mode: CorsMode,
+    ) -> Result<Self, ParseError<'i>> {
+        if let Ok(image) = input.try_parse(|input| {
+            Image::parse_with_cors_mode(context, input, cors_mode, /* allow_none = */ false)
+        }) {
+            return Ok(Self::Image(image));
+        }
+        Ok(Self::Color(Color::parse(context, input)?))
+    }
+}
+
+impl PercentOrNone {
+    fn parse_or_none<'i, 't>(context: &ParserContext, input: &mut Parser<'i, 't>) -> Self {
+        // We clamp our values here as this is the way that Safari and
+        // Chrome's implementation handle out-of-bounds percentages
+        // but whether or not this behavior follows the specification
+        // is still being discussed. See:
+        // <https://github.com/w3c/csswg-drafts/issues/5333>
+        if let Ok(percent) = input.try_parse(|input| Percentage::parse_non_negative(context, input))
+        {
+            Self::Percent(percent.clamp_to_hundred())
+        } else {
+            Self::None
+        }
+    }
+}
+
+impl ImageSet {
+    fn parse<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+        cors_mode: CorsMode,
+    ) -> Result<Self, ParseError<'i>> {
+        input.expect_function_matching("image-set")?;
+        let items = input.parse_nested_block(|input| {
+            input.parse_comma_separated(|input| ImageSetItem::parse(context, input, cors_mode))
+        })?;
+        Ok(Self {
+            selected_index: 0,
+            items: items.into(),
+        })
+    }
+}
+
+impl ImageSetItem {
+    fn parse<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+        cors_mode: CorsMode,
+    ) -> Result<Self, ParseError<'i>> {
+        let image = match input.try_parse(|i| i.expect_url_or_string()) {
+            Ok(url) => Image::Url(SpecifiedImageUrl::parse_from_string(
+                url.as_ref().into(),
+                context,
+                cors_mode,
+            )),
+            Err(..) => Image::parse_with_cors_mode(
+                context, input, cors_mode, /* allow_none = */ false,
+            )?,
+        };
+        let resolution = input
+            .try_parse(|input| Resolution::parse(context, input))
+            .unwrap_or(Resolution::X(1.0));
+        Ok(Self { image, resolution })
     }
 }
 
 impl Parse for Gradient {
-    fn parse<'i, 't>(context: &ParserContext, input: &mut Parser<'i, 't>) -> Result<Self, ParseError<'i>> {
+    fn parse<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Self, ParseError<'i>> {
         enum Shape {
             Linear,
             Radial,
+            Conic,
         }
 
-        // FIXME: remove clone() when lifetimes are non-lexical
-        let func = input.expect_function()?.clone();
-        let result = match_ignore_ascii_case! { &func,
+        let func = input.expect_function()?;
+        let (shape, repeating, compat_mode) = match_ignore_ascii_case! { &func,
             "linear-gradient" => {
-                Some((Shape::Linear, false, CompatMode::Modern))
+                (Shape::Linear, false, GradientCompatMode::Modern)
             },
             "-webkit-linear-gradient" => {
-                Some((Shape::Linear, false, CompatMode::WebKit))
+                (Shape::Linear, false, GradientCompatMode::WebKit)
             },
             #[cfg(feature = "gecko")]
             "-moz-linear-gradient" => {
-                Some((Shape::Linear, false, CompatMode::Moz))
+                (Shape::Linear, false, GradientCompatMode::Moz)
             },
             "repeating-linear-gradient" => {
-                Some((Shape::Linear, true, CompatMode::Modern))
+                (Shape::Linear, true, GradientCompatMode::Modern)
             },
             "-webkit-repeating-linear-gradient" => {
-                Some((Shape::Linear, true, CompatMode::WebKit))
+                (Shape::Linear, true, GradientCompatMode::WebKit)
             },
             #[cfg(feature = "gecko")]
             "-moz-repeating-linear-gradient" => {
-                Some((Shape::Linear, true, CompatMode::Moz))
+                (Shape::Linear, true, GradientCompatMode::Moz)
             },
             "radial-gradient" => {
-                Some((Shape::Radial, false, CompatMode::Modern))
+                (Shape::Radial, false, GradientCompatMode::Modern)
             },
             "-webkit-radial-gradient" => {
-                Some((Shape::Radial, false, CompatMode::WebKit))
-            }
+                (Shape::Radial, false, GradientCompatMode::WebKit)
+            },
             #[cfg(feature = "gecko")]
             "-moz-radial-gradient" => {
-                Some((Shape::Radial, false, CompatMode::Moz))
+                (Shape::Radial, false, GradientCompatMode::Moz)
             },
             "repeating-radial-gradient" => {
-                Some((Shape::Radial, true, CompatMode::Modern))
+                (Shape::Radial, true, GradientCompatMode::Modern)
             },
             "-webkit-repeating-radial-gradient" => {
-                Some((Shape::Radial, true, CompatMode::WebKit))
+                (Shape::Radial, true, GradientCompatMode::WebKit)
             },
             #[cfg(feature = "gecko")]
             "-moz-repeating-radial-gradient" => {
-                Some((Shape::Radial, true, CompatMode::Moz))
+                (Shape::Radial, true, GradientCompatMode::Moz)
+            },
+            "conic-gradient" => {
+                (Shape::Conic, false, GradientCompatMode::Modern)
+            },
+            "repeating-conic-gradient" => {
+                (Shape::Conic, true, GradientCompatMode::Modern)
             },
             "-webkit-gradient" => {
-                return input.parse_nested_block(|i| Self::parse_webkit_gradient_argument(context, i));
+                return input.parse_nested_block(|i| {
+                    Self::parse_webkit_gradient_argument(context, i)
+                });
             },
-            _ => None,
+            _ => {
+                let func = func.clone();
+                return Err(input.new_custom_error(StyleParseErrorKind::UnexpectedFunction(func)));
+            }
         };
 
-        let (shape, repeating, mut compat_mode) = match result {
-            Some(result) => result,
-            None => return Err(StyleParseError::UnexpectedFunction(func.clone()).into()),
-        };
-
-        let (kind, items) = input.parse_nested_block(|i| {
-            let shape = match shape {
-                Shape::Linear => GradientKind::parse_linear(context, i, &mut compat_mode)?,
-                Shape::Radial => GradientKind::parse_radial(context, i, &mut compat_mode)?,
-            };
-            let items = GradientItem::parse_comma_separated(context, i)?;
-            Ok((shape, items))
-        })?;
-
-        if items.len() < 2 {
-            return Err(StyleParseError::UnspecifiedError.into());
-        }
-
-        Ok(Gradient {
-            items: items,
-            repeating: repeating,
-            kind: kind,
-            compat_mode: compat_mode,
-        })
+        Ok(input.parse_nested_block(|i| {
+            Ok(match shape {
+                Shape::Linear => Self::parse_linear(context, i, repeating, compat_mode)?,
+                Shape::Radial => Self::parse_radial(context, i, repeating, compat_mode)?,
+                Shape::Conic => Self::parse_conic(context, i, repeating)?,
+            })
+        })?)
     }
 }
 
 impl Gradient {
-    fn parse_webkit_gradient_argument<'i, 't>(context: &ParserContext, input: &mut Parser<'i, 't>)
-                                              -> Result<Self, ParseError<'i>> {
+    fn parse_webkit_gradient_argument<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Self, ParseError<'i>> {
+        use crate::values::specified::position::{
+            HorizontalPositionKeyword as X, VerticalPositionKeyword as Y,
+        };
         type Point = GenericPosition<Component<X>, Component<Y>>;
 
-        #[derive(Clone, Copy)]
+        #[derive(Clone, Copy, Parse)]
         enum Component<S> {
             Center,
             Number(NumberOrPercentage),
@@ -282,28 +480,17 @@ impl Gradient {
                     _ => return LineDirection::Vertical(Y::Bottom),
                 };
                 match (h, v) {
-                    (Ordering::Less, Ordering::Less) => {
-                        LineDirection::Corner(X::Right, Y::Bottom)
-                    },
-                    (Ordering::Less, Ordering::Equal) => {
-                        LineDirection::Horizontal(X::Right)
-                    },
-                    (Ordering::Less, Ordering::Greater) => {
-                        LineDirection::Corner(X::Right, Y::Top)
-                    },
-                    (Ordering::Equal, Ordering::Greater) => {
-                        LineDirection::Vertical(Y::Top)
-                    },
-                    (Ordering::Equal, Ordering::Equal) |
-                    (Ordering::Equal, Ordering::Less) => {
+                    (Ordering::Less, Ordering::Less) => LineDirection::Corner(X::Right, Y::Bottom),
+                    (Ordering::Less, Ordering::Equal) => LineDirection::Horizontal(X::Right),
+                    (Ordering::Less, Ordering::Greater) => LineDirection::Corner(X::Right, Y::Top),
+                    (Ordering::Equal, Ordering::Greater) => LineDirection::Vertical(Y::Top),
+                    (Ordering::Equal, Ordering::Equal) | (Ordering::Equal, Ordering::Less) => {
                         LineDirection::Vertical(Y::Bottom)
                     },
                     (Ordering::Greater, Ordering::Less) => {
                         LineDirection::Corner(X::Left, Y::Bottom)
                     },
-                    (Ordering::Greater, Ordering::Equal) => {
-                        LineDirection::Horizontal(X::Left)
-                    },
+                    (Ordering::Greater, Ordering::Equal) => LineDirection::Horizontal(X::Left),
                     (Ordering::Greater, Ordering::Greater) => {
                         LineDirection::Corner(X::Left, Y::Top)
                     },
@@ -318,9 +505,11 @@ impl Gradient {
         }
 
         impl Parse for Point {
-            fn parse<'i, 't>(context: &ParserContext, input: &mut Parser<'i, 't>)
-                             -> Result<Self, ParseError<'i>> {
-                input.try(|i| {
+            fn parse<'i, 't>(
+                context: &ParserContext,
+                input: &mut Parser<'i, 't>,
+            ) -> Result<Self, ParseError<'i>> {
+                input.try_parse(|i| {
                     let x = Component::parse(context, i)?;
                     let y = Component::parse(context, i)?;
 
@@ -335,7 +524,11 @@ impl Gradient {
                     Component::Center => NumberOrPercentage::Percentage(Percentage::new(0.5)),
                     Component::Number(number) => number,
                     Component::Side(side) => {
-                        let p = if side.is_start() { Percentage::zero() } else { Percentage::hundred() };
+                        let p = if side.is_start() {
+                            Percentage::zero()
+                        } else {
+                            Percentage::hundred()
+                        };
                         NumberOrPercentage::Percentage(p)
                     },
                 }
@@ -345,74 +538,62 @@ impl Gradient {
         impl<S: Side> From<Component<S>> for PositionComponent<S> {
             fn from(component: Component<S>) -> Self {
                 match component {
-                    Component::Center => {
-                        PositionComponent::Center
-                    },
+                    Component::Center => PositionComponent::Center,
                     Component::Number(NumberOrPercentage::Number(number)) => {
                         PositionComponent::Length(Length::from_px(number.value).into())
                     },
                     Component::Number(NumberOrPercentage::Percentage(p)) => {
                         PositionComponent::Length(p.into())
                     },
-                    Component::Side(side) => {
-                        PositionComponent::Side(side, None)
-                    },
+                    Component::Side(side) => PositionComponent::Side(side, None),
                 }
             }
         }
 
         impl<S: Copy + Side> Component<S> {
             fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-                match (NumberOrPercentage::from(*self), NumberOrPercentage::from(*other)) {
+                match (
+                    NumberOrPercentage::from(*self),
+                    NumberOrPercentage::from(*other),
+                ) {
                     (NumberOrPercentage::Percentage(a), NumberOrPercentage::Percentage(b)) => {
                         a.get().partial_cmp(&b.get())
                     },
                     (NumberOrPercentage::Number(a), NumberOrPercentage::Number(b)) => {
                         a.value.partial_cmp(&b.value)
                     },
-                    (_, _) => {
-                        None
-                    }
+                    (_, _) => None,
                 }
-            }
-        }
-
-        impl<S: Parse> Parse for Component<S> {
-            fn parse<'i, 't>(context: &ParserContext, input: &mut Parser<'i, 't>)
-                             -> Result<Self, ParseError<'i>> {
-                if let Ok(side) = input.try(|i| S::parse(context, i)) {
-                    return Ok(Component::Side(side));
-                }
-                if let Ok(number) = input.try(|i| NumberOrPercentage::parse(context, i)) {
-                    return Ok(Component::Number(number));
-                }
-                input.try(|i| i.expect_ident_matching("center"))?;
-                Ok(Component::Center)
             }
         }
 
         let ident = input.expect_ident_cloned()?;
         input.expect_comma()?;
 
-        let (kind, reverse_stops) = match_ignore_ascii_case! { &ident,
+        Ok(match_ignore_ascii_case! { &ident,
             "linear" => {
                 let first = Point::parse(context, input)?;
                 input.expect_comma()?;
                 let second = Point::parse(context, input)?;
 
                 let direction = LineDirection::from_points(first, second);
-                let kind = GenericGradientKind::Linear(direction);
+                let items = Gradient::parse_webkit_gradient_stops(context, input, false)?;
 
-                (kind, false)
+                generic::Gradient::Linear {
+                    direction,
+                    items,
+                    repeating: false,
+                    compat_mode: GradientCompatMode::Modern,
+                }
             },
             "radial" => {
                 let first_point = Point::parse(context, input)?;
                 input.expect_comma()?;
-                let first_radius = Number::parse(context, input)?;
+                let first_radius = Number::parse_non_negative(context, input)?;
                 input.expect_comma()?;
                 let second_point = Point::parse(context, input)?;
                 input.expect_comma()?;
-                let second_radius = Number::parse(context, input)?;
+                let second_radius = Number::parse_non_negative(context, input)?;
 
                 let (reverse_stops, point, radius) = if second_radius.value >= first_radius.value {
                     (false, second_point, second_radius)
@@ -420,68 +601,78 @@ impl Gradient {
                     (true, first_point, first_radius)
                 };
 
-                let shape = GenericEndingShape::Circle(Circle::Radius(Length::from_px(radius.value)));
+                let rad = Circle::Radius(NonNegative(Length::from_px(radius.value)));
+                let shape = generic::EndingShape::Circle(rad);
                 let position: Position = point.into();
+                let items = Gradient::parse_webkit_gradient_stops(context, input, reverse_stops)?;
 
-                #[cfg(feature = "gecko")]
-                {
-                    let kind = GenericGradientKind::Radial(shape, GradientPosition::Modern(position), None);
-                    (kind, reverse_stops)
-                }
-
-                #[cfg(not(feature = "gecko"))]
-                {
-                    let kind = GenericGradientKind::Radial(shape, position, None);
-                    (kind, reverse_stops)
+                generic::Gradient::Radial {
+                    shape,
+                    position,
+                    items,
+                    repeating: false,
+                    compat_mode: GradientCompatMode::Modern,
                 }
             },
-            _ => return Err(SelectorParseError::UnexpectedIdent(ident.clone()).into()),
-        };
+            _ => {
+                let e = SelectorParseErrorKind::UnexpectedIdent(ident.clone());
+                return Err(input.new_custom_error(e));
+            },
+        })
+    }
 
-        let mut items = input.try(|i| {
-            i.expect_comma()?;
-            i.parse_comma_separated(|i| {
-                let function = i.expect_function()?.clone();
-                let (color, mut p) = i.parse_nested_block(|i| {
-                    let p = match_ignore_ascii_case! { &function,
-                        "color-stop" => {
-                            let p = match NumberOrPercentage::parse(context, i)? {
-                                NumberOrPercentage::Number(number) => Percentage::new(number.value),
-                                NumberOrPercentage::Percentage(p) => p,
-                            };
-                            i.expect_comma()?;
-                            p
-                        },
-                        "from" => Percentage::zero(),
-                        "to" => Percentage::hundred(),
-                        _ => return Err(StyleParseError::UnexpectedFunction(function.clone()).into()),
-                    };
-                    let color = Color::parse(context, i)?;
-                    if color == Color::CurrentColor {
-                        return Err(StyleParseError::UnspecifiedError.into());
+    fn parse_webkit_gradient_stops<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+        reverse_stops: bool,
+    ) -> Result<LengthPercentageItemList, ParseError<'i>> {
+        let mut items = input
+            .try_parse(|i| {
+                i.expect_comma()?;
+                i.parse_comma_separated(|i| {
+                    let function = i.expect_function()?.clone();
+                    let (color, mut p) = i.parse_nested_block(|i| {
+                        let p = match_ignore_ascii_case! { &function,
+                            "color-stop" => {
+                                let p = NumberOrPercentage::parse(context, i)?.to_percentage();
+                                i.expect_comma()?;
+                                p
+                            },
+                            "from" => Percentage::zero(),
+                            "to" => Percentage::hundred(),
+                            _ => {
+                                return Err(i.new_custom_error(
+                                    StyleParseErrorKind::UnexpectedFunction(function.clone())
+                                ))
+                            },
+                        };
+                        let color = Color::parse(context, i)?;
+                        if color == Color::CurrentColor {
+                            return Err(i.new_custom_error(StyleParseErrorKind::UnspecifiedError));
+                        }
+                        Ok((color.into(), p))
+                    })?;
+                    if reverse_stops {
+                        p.reverse();
                     }
-                    Ok((color.into(), p))
-                })?;
-                if reverse_stops {
-                    p.reverse();
-                }
-                Ok(GenericGradientItem::ColorStop(GenericColorStop {
-                    color: color,
-                    position: Some(p.into()),
-                }))
+                    Ok(generic::GradientItem::ComplexColorStop {
+                        color,
+                        position: p.into(),
+                    })
+                })
             })
-        }).unwrap_or(vec![]);
+            .unwrap_or(vec![]);
 
         if items.is_empty() {
             items = vec![
-                GenericGradientItem::ColorStop(GenericColorStop {
+                generic::GradientItem::ComplexColorStop {
                     color: Color::transparent().into(),
-                    position: Some(Percentage::zero().into()),
-                }),
-                GenericGradientItem::ColorStop(GenericColorStop {
+                    position: Percentage::zero().into(),
+                },
+                generic::GradientItem::ComplexColorStop {
                     color: Color::transparent().into(),
-                    position: Some(Percentage::hundred().into()),
-                }),
+                    position: Percentage::hundred().into(),
+                },
             ];
         } else if items.len() == 1 {
             let first = items[0].clone();
@@ -489,13 +680,20 @@ impl Gradient {
         } else {
             items.sort_by(|a, b| {
                 match (a, b) {
-                    (&GenericGradientItem::ColorStop(ref a), &GenericGradientItem::ColorStop(ref b)) => {
-                        match (&a.position, &b.position) {
-                            (&Some(LengthOrPercentage::Percentage(a)), &Some(LengthOrPercentage::Percentage(b))) => {
-                                return a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal);
-                            },
-                            _ => {},
-                        }
+                    (
+                        &generic::GradientItem::ComplexColorStop {
+                            position: ref a_position,
+                            ..
+                        },
+                        &generic::GradientItem::ComplexColorStop {
+                            position: ref b_position,
+                            ..
+                        },
+                    ) => match (a_position, b_position) {
+                        (&LengthPercentage::Percentage(a), &LengthPercentage::Percentage(b)) => {
+                            return a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal);
+                        },
+                        _ => {},
                     },
                     _ => {},
                 }
@@ -506,231 +704,226 @@ impl Gradient {
                 }
             })
         }
-
-        Ok(GenericGradient {
-            kind: kind,
-            items: items,
-            repeating: false,
-            compat_mode: CompatMode::Modern,
-        })
+        Ok(items.into())
     }
-}
 
-impl GradientKind {
+    /// Not used for -webkit-gradient syntax and conic-gradient
+    fn parse_stops<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<LengthPercentageItemList, ParseError<'i>> {
+        let items =
+            generic::GradientItem::parse_comma_separated(context, input, LengthPercentage::parse)?;
+        if items.len() < 2 {
+            return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError));
+        }
+        Ok(items)
+    }
+
     /// Parses a linear gradient.
-    /// CompatMode can change during `-moz-` prefixed gradient parsing if it come across a `to` keyword.
-    fn parse_linear<'i, 't>(context: &ParserContext,
-                            input: &mut Parser<'i, 't>,
-                            compat_mode: &mut CompatMode)
-                            -> Result<Self, ParseError<'i>> {
-        let direction = if let Ok(d) = input.try(|i| LineDirection::parse(context, i, compat_mode)) {
+    /// GradientCompatMode can change during `-moz-` prefixed gradient parsing if it come across a `to` keyword.
+    fn parse_linear<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+        repeating: bool,
+        mut compat_mode: GradientCompatMode,
+    ) -> Result<Self, ParseError<'i>> {
+        let direction = if let Ok(d) =
+            input.try_parse(|i| LineDirection::parse(context, i, &mut compat_mode))
+        {
             input.expect_comma()?;
             d
         } else {
-            match *compat_mode {
-                CompatMode::Modern => LineDirection::Vertical(Y::Bottom),
-                _ => LineDirection::Vertical(Y::Top),
+            match compat_mode {
+                GradientCompatMode::Modern => {
+                    LineDirection::Vertical(VerticalPositionKeyword::Bottom)
+                },
+                _ => LineDirection::Vertical(VerticalPositionKeyword::Top),
             }
         };
-        Ok(GenericGradientKind::Linear(direction))
+        let items = Gradient::parse_stops(context, input)?;
+
+        Ok(Gradient::Linear {
+            direction,
+            items,
+            repeating,
+            compat_mode,
+        })
     }
 
-    fn parse_radial<'i, 't>(context: &ParserContext,
-                            input: &mut Parser<'i, 't>,
-                            compat_mode: &mut CompatMode)
-                            -> Result<Self, ParseError<'i>> {
-        let (shape, position, angle, moz_position) = match *compat_mode {
-            CompatMode::Modern => {
-                let shape = input.try(|i| EndingShape::parse(context, i, *compat_mode));
-                let position = input.try(|i| {
+    /// Parses a radial gradient.
+    fn parse_radial<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+        repeating: bool,
+        compat_mode: GradientCompatMode,
+    ) -> Result<Self, ParseError<'i>> {
+        let (shape, position) = match compat_mode {
+            GradientCompatMode::Modern => {
+                let shape = input.try_parse(|i| EndingShape::parse(context, i, compat_mode));
+                let position = input.try_parse(|i| {
                     i.expect_ident_matching("at")?;
                     Position::parse(context, i)
                 });
-                (shape, position.ok(), None, None)
+                (shape, position.ok())
             },
-            CompatMode::WebKit => {
-                let position = input.try(|i| Position::parse(context, i));
-                let shape = input.try(|i| {
+            _ => {
+                let position = input.try_parse(|i| Position::parse(context, i));
+                let shape = input.try_parse(|i| {
                     if position.is_ok() {
                         i.expect_comma()?;
                     }
-                    EndingShape::parse(context, i, *compat_mode)
+                    EndingShape::parse(context, i, compat_mode)
                 });
-                (shape, position.ok(), None, None)
+                (shape, position.ok())
             },
-            // The syntax of `-moz-` prefixed radial gradient is:
-            // -moz-radial-gradient(
-            //   [ [ <position> || <angle> ]?  [ ellipse | [ <length> | <percentage> ]{2} ] , |
-            //     [ <position> || <angle> ]?  [ [ circle | ellipse ] | <extent-keyword> ] , |
-            //   ]?
-            //   <color-stop> [ , <color-stop> ]+
-            // )
-            // where <extent-keyword> = closest-corner | closest-side | farthest-corner | farthest-side |
-            //                          cover | contain
-            // and <color-stop>     = <color> [ <percentage> | <length> ]?
-            CompatMode::Moz => {
-                let mut position = input.try(|i| LegacyPosition::parse(context, i));
-                let angle = input.try(|i| Angle::parse(context, i)).ok();
-                if position.is_err() {
-                    position = input.try(|i| LegacyPosition::parse(context, i));
-                }
-
-                let shape = input.try(|i| {
-                    if position.is_ok() || angle.is_some() {
-                        i.expect_comma()?;
-                    }
-                    EndingShape::parse(context, i, *compat_mode)
-                });
-
-                (shape, None, angle, position.ok())
-            }
         };
 
-        if shape.is_ok() || position.is_some() || angle.is_some() || moz_position.is_some() {
+        if shape.is_ok() || position.is_some() {
             input.expect_comma()?;
         }
 
         let shape = shape.unwrap_or({
-            GenericEndingShape::Ellipse(Ellipse::Extent(ShapeExtent::FarthestCorner))
+            generic::EndingShape::Ellipse(Ellipse::Extent(ShapeExtent::FarthestCorner))
         });
 
-        #[cfg(feature = "gecko")]
-        {
-            if *compat_mode == CompatMode::Moz {
-                // If this form can be represented in Modern mode, then convert the compat_mode to Modern.
-                if angle.is_none() {
-                    *compat_mode = CompatMode::Modern;
-                }
-                let position = moz_position.unwrap_or(LegacyPosition::center());
-                return Ok(GenericGradientKind::Radial(shape, GradientPosition::Legacy(position), angle));
-            }
+        let position = position.unwrap_or(Position::center());
+
+        let items = Gradient::parse_stops(context, input)?;
+
+        Ok(Gradient::Radial {
+            shape,
+            position,
+            items,
+            repeating,
+            compat_mode,
+        })
+    }
+    fn parse_conic<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+        repeating: bool,
+    ) -> Result<Self, ParseError<'i>> {
+        let angle = input.try_parse(|i| {
+            i.expect_ident_matching("from")?;
+            // Spec allows unitless zero start angles
+            // https://drafts.csswg.org/css-images-4/#valdef-conic-gradient-angle
+            Angle::parse_with_unitless(context, i)
+        });
+        let position = input.try_parse(|i| {
+            i.expect_ident_matching("at")?;
+            Position::parse(context, i)
+        });
+        if angle.is_ok() || position.is_ok() {
+            input.expect_comma()?;
         }
 
+        let angle = angle.unwrap_or(Angle::zero());
         let position = position.unwrap_or(Position::center());
-        #[cfg(feature = "gecko")]
-        {
-            return Ok(GenericGradientKind::Radial(shape, GradientPosition::Modern(position), angle));
+        let items = generic::GradientItem::parse_comma_separated(
+            context,
+            input,
+            AngleOrPercentage::parse_with_unitless,
+        )?;
+
+        if cfg!(feature = "servo") || items.len() < 2 {
+            return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError));
         }
-        #[cfg(not(feature = "gecko"))]
-        {
-            return Ok(GenericGradientKind::Radial(shape, position, angle));
-        }
+
+        Ok(Gradient::Conic {
+            angle,
+            position,
+            items,
+            repeating,
+        })
     }
 }
 
-impl GenericsLineDirection for LineDirection {
-    fn points_downwards(&self, compat_mode: CompatMode) -> bool {
+impl generic::LineDirection for LineDirection {
+    fn points_downwards(&self, compat_mode: GradientCompatMode) -> bool {
         match *self {
-            LineDirection::Angle(ref angle) => angle.radians() == PI,
-            LineDirection::Vertical(Y::Bottom)
-                if compat_mode == CompatMode::Modern => true,
-            LineDirection::Vertical(Y::Top)
-                if compat_mode != CompatMode::Modern => true,
+            LineDirection::Angle(ref angle) => angle.degrees() == 180.0,
+            LineDirection::Vertical(VerticalPositionKeyword::Bottom) => {
+                compat_mode == GradientCompatMode::Modern
+            },
+            LineDirection::Vertical(VerticalPositionKeyword::Top) => {
+                compat_mode != GradientCompatMode::Modern
+            },
             _ => false,
         }
     }
 
-    fn to_css<W>(&self, dest: &mut W, compat_mode: CompatMode) -> fmt::Result
-        where W: fmt::Write
+    fn to_css<W>(&self, dest: &mut CssWriter<W>, compat_mode: GradientCompatMode) -> fmt::Result
+    where
+        W: Write,
     {
         match *self {
-            LineDirection::Angle(angle) => {
-                angle.to_css(dest)
-            },
+            LineDirection::Angle(angle) => angle.to_css(dest),
             LineDirection::Horizontal(x) => {
-                if compat_mode == CompatMode::Modern {
+                if compat_mode == GradientCompatMode::Modern {
                     dest.write_str("to ")?;
                 }
                 x.to_css(dest)
             },
             LineDirection::Vertical(y) => {
-                if compat_mode == CompatMode::Modern {
+                if compat_mode == GradientCompatMode::Modern {
                     dest.write_str("to ")?;
                 }
                 y.to_css(dest)
             },
             LineDirection::Corner(x, y) => {
-                if compat_mode == CompatMode::Modern {
+                if compat_mode == GradientCompatMode::Modern {
                     dest.write_str("to ")?;
                 }
                 x.to_css(dest)?;
                 dest.write_str(" ")?;
                 y.to_css(dest)
             },
-            #[cfg(feature = "gecko")]
-            LineDirection::MozPosition(ref position, ref angle) => {
-                let mut need_space = false;
-                if let Some(ref position) = *position {
-                    position.to_css(dest)?;
-                    need_space = true;
-                }
-                if let Some(ref angle) = *angle {
-                    if need_space {
-                        dest.write_str(" ")?;
-                    }
-                    angle.to_css(dest)?;
-                }
-                Ok(())
-            },
         }
     }
 }
 
 impl LineDirection {
-    fn parse<'i, 't>(context: &ParserContext,
-                     input: &mut Parser<'i, 't>,
-                     compat_mode: &mut CompatMode)
-                     -> Result<Self, ParseError<'i>> {
-        let mut _angle = if *compat_mode == CompatMode::Moz {
-            input.try(|i| Angle::parse(context, i)).ok()
-        } else {
-            if let Ok(angle) = input.try(|i| Angle::parse_with_unitless(context, i)) {
-                return Ok(LineDirection::Angle(angle));
-            }
-            None
-        };
+    fn parse<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+        compat_mode: &mut GradientCompatMode,
+    ) -> Result<Self, ParseError<'i>> {
+        // Gradients allow unitless zero angles as an exception, see:
+        // https://github.com/w3c/csswg-drafts/issues/1162
+        if let Ok(angle) = input.try_parse(|i| Angle::parse_with_unitless(context, i)) {
+            return Ok(LineDirection::Angle(angle));
+        }
 
-        input.try(|i| {
-            let to_ident = i.try(|i| i.expect_ident_matching("to"));
+        input.try_parse(|i| {
+            let to_ident = i.try_parse(|i| i.expect_ident_matching("to"));
             match *compat_mode {
                 // `to` keyword is mandatory in modern syntax.
-                CompatMode::Modern => to_ident?,
+                GradientCompatMode::Modern => to_ident?,
                 // Fall back to Modern compatibility mode in case there is a `to` keyword.
                 // According to Gecko, `-moz-linear-gradient(to ...)` should serialize like
                 // `linear-gradient(to ...)`.
-                CompatMode::Moz if to_ident.is_ok() => *compat_mode = CompatMode::Modern,
+                GradientCompatMode::Moz if to_ident.is_ok() => {
+                    *compat_mode = GradientCompatMode::Modern
+                },
                 // There is no `to` keyword in webkit prefixed syntax. If it's consumed,
                 // parsing should throw an error.
-                CompatMode::WebKit if to_ident.is_ok() => {
-                    return Err(SelectorParseError::UnexpectedIdent("to".into()).into())
+                GradientCompatMode::WebKit if to_ident.is_ok() => {
+                    return Err(
+                        i.new_custom_error(SelectorParseErrorKind::UnexpectedIdent("to".into()))
+                    );
                 },
                 _ => {},
             }
 
-            #[cfg(feature = "gecko")]
-            {
-                // `-moz-` prefixed linear gradient can be both Angle and Position.
-                if *compat_mode == CompatMode::Moz {
-                    let position = i.try(|i| LegacyPosition::parse(context, i)).ok();
-                    if _angle.is_none() {
-                        _angle = i.try(|i| Angle::parse(context, i)).ok();
-                    };
-
-                    if _angle.is_none() && position.is_none() {
-                        return Err(StyleParseError::UnspecifiedError.into());
-                    }
-                    return Ok(LineDirection::MozPosition(position, _angle));
-                }
-            }
-
-            if let Ok(x) = i.try(X::parse) {
-                if let Ok(y) = i.try(Y::parse) {
+            if let Ok(x) = i.try_parse(HorizontalPositionKeyword::parse) {
+                if let Ok(y) = i.try_parse(VerticalPositionKeyword::parse) {
                     return Ok(LineDirection::Corner(x, y));
                 }
                 return Ok(LineDirection::Horizontal(x));
             }
-            let y = Y::parse(i)?;
-            if let Ok(x) = i.try(X::parse) {
+            let y = VerticalPositionKeyword::parse(i)?;
+            if let Ok(x) = i.try_parse(HorizontalPositionKeyword::parse) {
                 return Ok(LineDirection::Corner(x, y));
             }
             Ok(LineDirection::Vertical(y))
@@ -738,110 +931,121 @@ impl LineDirection {
     }
 }
 
-#[cfg(feature = "gecko")]
-impl ToComputedValue for GradientPosition {
-    type ComputedValue = ComputedPosition;
-
-    fn to_computed_value(&self, context: &Context) -> ComputedPosition {
-        match *self {
-            GradientPosition::Modern(ref pos) => pos.to_computed_value(context),
-            GradientPosition::Legacy(ref pos) => pos.to_computed_value(context),
-        }
-    }
-
-    fn from_computed_value(computed: &ComputedPosition) -> Self {
-        GradientPosition::Modern(ToComputedValue::from_computed_value(computed))
-    }
-}
-
 impl EndingShape {
-    fn parse<'i, 't>(context: &ParserContext,
-                     input: &mut Parser<'i, 't>,
-                     compat_mode: CompatMode)
-                     -> Result<Self, ParseError<'i>> {
-        if let Ok(extent) = input.try(|i| ShapeExtent::parse_with_compat_mode(i, compat_mode)) {
-            if input.try(|i| i.expect_ident_matching("circle")).is_ok() {
-                return Ok(GenericEndingShape::Circle(Circle::Extent(extent)));
+    fn parse<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+        compat_mode: GradientCompatMode,
+    ) -> Result<Self, ParseError<'i>> {
+        if let Ok(extent) = input.try_parse(|i| ShapeExtent::parse_with_compat_mode(i, compat_mode))
+        {
+            if input
+                .try_parse(|i| i.expect_ident_matching("circle"))
+                .is_ok()
+            {
+                return Ok(generic::EndingShape::Circle(Circle::Extent(extent)));
             }
-            let _ = input.try(|i| i.expect_ident_matching("ellipse"));
-            return Ok(GenericEndingShape::Ellipse(Ellipse::Extent(extent)));
+            let _ = input.try_parse(|i| i.expect_ident_matching("ellipse"));
+            return Ok(generic::EndingShape::Ellipse(Ellipse::Extent(extent)));
         }
-        if input.try(|i| i.expect_ident_matching("circle")).is_ok() {
-            if let Ok(extent) = input.try(|i| ShapeExtent::parse_with_compat_mode(i, compat_mode)) {
-                return Ok(GenericEndingShape::Circle(Circle::Extent(extent)));
+        if input
+            .try_parse(|i| i.expect_ident_matching("circle"))
+            .is_ok()
+        {
+            if let Ok(extent) =
+                input.try_parse(|i| ShapeExtent::parse_with_compat_mode(i, compat_mode))
+            {
+                return Ok(generic::EndingShape::Circle(Circle::Extent(extent)));
             }
-            if compat_mode == CompatMode::Modern {
-                if let Ok(length) = input.try(|i| Length::parse(context, i)) {
-                    return Ok(GenericEndingShape::Circle(Circle::Radius(length)));
+            if compat_mode == GradientCompatMode::Modern {
+                if let Ok(length) = input.try_parse(|i| NonNegativeLength::parse(context, i)) {
+                    return Ok(generic::EndingShape::Circle(Circle::Radius(length)));
                 }
             }
-            return Ok(GenericEndingShape::Circle(Circle::Extent(ShapeExtent::FarthestCorner)));
+            return Ok(generic::EndingShape::Circle(Circle::Extent(
+                ShapeExtent::FarthestCorner,
+            )));
         }
-        if input.try(|i| i.expect_ident_matching("ellipse")).is_ok() {
-            if let Ok(extent) = input.try(|i| ShapeExtent::parse_with_compat_mode(i, compat_mode)) {
-                return Ok(GenericEndingShape::Ellipse(Ellipse::Extent(extent)));
+        if input
+            .try_parse(|i| i.expect_ident_matching("ellipse"))
+            .is_ok()
+        {
+            if let Ok(extent) =
+                input.try_parse(|i| ShapeExtent::parse_with_compat_mode(i, compat_mode))
+            {
+                return Ok(generic::EndingShape::Ellipse(Ellipse::Extent(extent)));
             }
-            if compat_mode == CompatMode::Modern {
-                let pair: Result<_, ParseError> = input.try(|i| {
-                    let x = LengthOrPercentage::parse(context, i)?;
-                    let y = LengthOrPercentage::parse(context, i)?;
+            if compat_mode == GradientCompatMode::Modern {
+                let pair: Result<_, ParseError> = input.try_parse(|i| {
+                    let x = NonNegativeLengthPercentage::parse(context, i)?;
+                    let y = NonNegativeLengthPercentage::parse(context, i)?;
                     Ok((x, y))
                 });
                 if let Ok((x, y)) = pair {
-                    return Ok(GenericEndingShape::Ellipse(Ellipse::Radii(x, y)));
+                    return Ok(generic::EndingShape::Ellipse(Ellipse::Radii(x, y)));
                 }
             }
-            return Ok(GenericEndingShape::Ellipse(Ellipse::Extent(ShapeExtent::FarthestCorner)));
+            return Ok(generic::EndingShape::Ellipse(Ellipse::Extent(
+                ShapeExtent::FarthestCorner,
+            )));
         }
-        // -moz- prefixed radial gradient doesn't allow EndingShape's Length or LengthOrPercentage
-        // to come before shape keyword. Otherwise it conflicts with <position>.
-        if compat_mode != CompatMode::Moz {
-            if let Ok(length) = input.try(|i| Length::parse(context, i)) {
-                if let Ok(y) = input.try(|i| LengthOrPercentage::parse(context, i)) {
-                    if compat_mode == CompatMode::Modern {
-                        let _ = input.try(|i| i.expect_ident_matching("ellipse"));
-                    }
-                    return Ok(GenericEndingShape::Ellipse(Ellipse::Radii(length.into(), y)));
+        if let Ok(length) = input.try_parse(|i| NonNegativeLength::parse(context, i)) {
+            if let Ok(y) = input.try_parse(|i| NonNegativeLengthPercentage::parse(context, i)) {
+                if compat_mode == GradientCompatMode::Modern {
+                    let _ = input.try_parse(|i| i.expect_ident_matching("ellipse"));
                 }
-                if compat_mode == CompatMode::Modern {
-                    let y = input.try(|i| {
-                        i.expect_ident_matching("ellipse")?;
-                        LengthOrPercentage::parse(context, i)
-                    });
-                    if let Ok(y) = y {
-                        return Ok(GenericEndingShape::Ellipse(Ellipse::Radii(length.into(), y)));
-                    }
-                    let _ = input.try(|i| i.expect_ident_matching("circle"));
+                return Ok(generic::EndingShape::Ellipse(Ellipse::Radii(
+                    NonNegative(LengthPercentage::from(length.0)),
+                    y,
+                )));
+            }
+            if compat_mode == GradientCompatMode::Modern {
+                let y = input.try_parse(|i| {
+                    i.expect_ident_matching("ellipse")?;
+                    NonNegativeLengthPercentage::parse(context, i)
+                });
+                if let Ok(y) = y {
+                    return Ok(generic::EndingShape::Ellipse(Ellipse::Radii(
+                        NonNegative(LengthPercentage::from(length.0)),
+                        y,
+                    )));
                 }
+                let _ = input.try_parse(|i| i.expect_ident_matching("circle"));
+            }
 
-                return Ok(GenericEndingShape::Circle(Circle::Radius(length)));
-            }
+            return Ok(generic::EndingShape::Circle(Circle::Radius(length)));
         }
-        input.try(|i| {
-            let x = Percentage::parse(context, i)?;
-            let y = if let Ok(y) = i.try(|i| LengthOrPercentage::parse(context, i)) {
-                if compat_mode == CompatMode::Modern {
-                    let _ = i.try(|i| i.expect_ident_matching("ellipse"));
+        input.try_parse(|i| {
+            let x = Percentage::parse_non_negative(context, i)?;
+            let y = if let Ok(y) = i.try_parse(|i| NonNegativeLengthPercentage::parse(context, i)) {
+                if compat_mode == GradientCompatMode::Modern {
+                    let _ = i.try_parse(|i| i.expect_ident_matching("ellipse"));
                 }
                 y
             } else {
-                if compat_mode == CompatMode::Modern {
+                if compat_mode == GradientCompatMode::Modern {
                     i.expect_ident_matching("ellipse")?;
                 }
-                LengthOrPercentage::parse(context, i)?
+                NonNegativeLengthPercentage::parse(context, i)?
             };
-            Ok(GenericEndingShape::Ellipse(Ellipse::Radii(x.into(), y)))
+            Ok(generic::EndingShape::Ellipse(Ellipse::Radii(
+                NonNegative(LengthPercentage::from(x)),
+                y,
+            )))
         })
     }
 }
 
 impl ShapeExtent {
-    fn parse_with_compat_mode<'i, 't>(input: &mut Parser<'i, 't>,
-                                      compat_mode: CompatMode)
-                                      -> Result<Self, ParseError<'i>> {
+    fn parse_with_compat_mode<'i, 't>(
+        input: &mut Parser<'i, 't>,
+        compat_mode: GradientCompatMode,
+    ) -> Result<Self, ParseError<'i>> {
         match Self::parse(input)? {
-            ShapeExtent::Contain | ShapeExtent::Cover if compat_mode == CompatMode::Modern => {
-                Err(StyleParseError::UnspecifiedError.into())
+            ShapeExtent::Contain | ShapeExtent::Cover
+                if compat_mode == GradientCompatMode::Modern =>
+            {
+                Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError))
             },
             ShapeExtent::Contain => Ok(ShapeExtent::ClosestSide),
             ShapeExtent::Cover => Ok(ShapeExtent::FarthestCorner),
@@ -850,60 +1054,110 @@ impl ShapeExtent {
     }
 }
 
-impl GradientItem {
-    fn parse_comma_separated<'i, 't>(context: &ParserContext, input: &mut Parser<'i, 't>)
-                                     -> Result<Vec<Self>, ParseError<'i>> {
+impl<T> generic::GradientItem<Color, T> {
+    fn parse_comma_separated<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+        parse_position: impl for<'i1, 't1> Fn(&ParserContext, &mut Parser<'i1, 't1>) -> Result<T, ParseError<'i1>>
+            + Copy,
+    ) -> Result<crate::OwnedSlice<Self>, ParseError<'i>> {
+        let mut items = Vec::new();
         let mut seen_stop = false;
-        let items = input.parse_comma_separated(|input| {
-            if seen_stop {
-                if let Ok(hint) = input.try(|i| LengthOrPercentage::parse(context, i)) {
-                    seen_stop = false;
-                    return Ok(GenericGradientItem::InterpolationHint(hint));
+
+        loop {
+            input.parse_until_before(Delimiter::Comma, |input| {
+                if seen_stop {
+                    if let Ok(hint) = input.try_parse(|i| parse_position(context, i)) {
+                        seen_stop = false;
+                        items.push(generic::GradientItem::InterpolationHint(hint));
+                        return Ok(());
+                    }
                 }
+
+                let stop = generic::ColorStop::parse(context, input, parse_position)?;
+
+                if let Ok(multi_position) = input.try_parse(|i| parse_position(context, i)) {
+                    let stop_color = stop.color.clone();
+                    items.push(stop.into_item());
+                    items.push(
+                        generic::ColorStop {
+                            color: stop_color,
+                            position: Some(multi_position),
+                        }
+                        .into_item(),
+                    );
+                } else {
+                    items.push(stop.into_item());
+                }
+
+                seen_stop = true;
+                Ok(())
+            })?;
+
+            match input.next() {
+                Err(_) => break,
+                Ok(&Token::Comma) => continue,
+                Ok(_) => unreachable!(),
             }
-            seen_stop = true;
-            ColorStop::parse(context, input).map(GenericGradientItem::ColorStop)
-        })?;
-        if !seen_stop || items.len() < 2 {
-            return Err(StyleParseError::UnspecifiedError.into());
         }
-        Ok(items)
+
+        if !seen_stop || items.len() < 2 {
+            return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError));
+        }
+        Ok(items.into())
     }
 }
 
-impl Parse for ColorStop {
-    fn parse<'i, 't>(context: &ParserContext, input: &mut Parser<'i, 't>)
-                     -> Result<Self, ParseError<'i>> {
-        Ok(ColorStop {
-            color: RGBAColor::parse(context, input)?,
-            position: input.try(|i| LengthOrPercentage::parse(context, i)).ok(),
+impl<T> generic::ColorStop<Color, T> {
+    fn parse<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+        parse_position: impl for<'i1, 't1> Fn(
+            &ParserContext,
+            &mut Parser<'i1, 't1>,
+        ) -> Result<T, ParseError<'i1>>,
+    ) -> Result<Self, ParseError<'i>> {
+        Ok(generic::ColorStop {
+            color: Color::parse(context, input)?,
+            position: input.try_parse(|i| parse_position(context, i)).ok(),
         })
     }
 }
 
 impl Parse for PaintWorklet {
-    fn parse<'i, 't>(context: &ParserContext, input: &mut Parser<'i, 't>) -> Result<Self, ParseError<'i>> {
+    fn parse<'i, 't>(
+        _context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Self, ParseError<'i>> {
         input.expect_function_matching("paint")?;
         input.parse_nested_block(|input| {
             let name = Atom::from(&**input.expect_ident()?);
-            let arguments = input.try(|input| {
-                input.expect_comma()?;
-                input.parse_comma_separated(|input| Ok(*SpecifiedValue::parse(context, input)?))
-            }).unwrap_or(vec![]);
-            Ok(PaintWorklet {
-                name: name,
-                arguments: arguments,
-            })
+            let arguments = input
+                .try_parse(|input| {
+                    input.expect_comma()?;
+                    input.parse_comma_separated(|input| SpecifiedValue::parse(input))
+                })
+                .unwrap_or(vec![]);
+            Ok(PaintWorklet { name, arguments })
         })
     }
 }
 
-impl Parse for MozImageRect {
-    fn parse<'i, 't>(context: &ParserContext, input: &mut Parser<'i, 't>) -> Result<Self, ParseError<'i>> {
-        input.try(|i| i.expect_function_matching("-moz-image-rect"))?;
+impl MozImageRect {
+    #[cfg(feature = "gecko")]
+    fn parse<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+        cors_mode: CorsMode,
+    ) -> Result<Self, ParseError<'i>> {
+        input.try_parse(|i| i.expect_function_matching("-moz-image-rect"))?;
         input.parse_nested_block(|i| {
             let string = i.expect_url_or_string()?;
-            let url = SpecifiedUrl::parse_from_string(string.as_ref().to_owned(), context)?;
+            let url = SpecifiedImageUrl::parse_from_string(
+                string.as_ref().to_owned(),
+                context,
+                cors_mode,
+            );
             i.expect_comma()?;
             let top = NumberOrPercentage::parse_non_negative(context, i)?;
             i.expect_comma()?;
@@ -912,13 +1166,12 @@ impl Parse for MozImageRect {
             let bottom = NumberOrPercentage::parse_non_negative(context, i)?;
             i.expect_comma()?;
             let left = NumberOrPercentage::parse_non_negative(context, i)?;
-
             Ok(MozImageRect {
-                url: url,
-                top: top,
-                right: right,
-                bottom: bottom,
-                left: left,
+                url,
+                top,
+                right,
+                bottom,
+                left,
             })
         })
     }

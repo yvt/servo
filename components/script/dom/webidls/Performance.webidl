@@ -1,23 +1,19 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 /*
  * The origin of this IDL file is
- * https://dvcs.w3.org/hg/webperf/raw-file/tip/specs/NavigationTiming/Overview.html#sec-window.performance-attribute
+ * https://w3c.github.io/hr-time/#sec-performance
  */
 
 typedef double DOMHighResTimeStamp;
 typedef sequence<PerformanceEntry> PerformanceEntryList;
 
 [Exposed=(Window, Worker)]
-interface Performance {
+interface Performance : EventTarget {
   DOMHighResTimeStamp now();
-};
-
-[Exposed=(Window)]
-partial interface Performance {
-  readonly attribute PerformanceTiming timing;
-  /*  readonly attribute PerformanceNavigation navigation; */
+  readonly attribute DOMHighResTimeStamp timeOrigin;
+  [Default] object toJSON();
 };
 
 // https://w3c.github.io/performance-timeline/#extensions-to-the-performance-interface
@@ -38,4 +34,20 @@ partial interface Performance {
   [Throws]
   void measure(DOMString measureName, optional DOMString startMark, optional DOMString endMark);
   void clearMeasures(optional DOMString measureName);
+};
+
+//https://w3c.github.io/resource-timing/#sec-extensions-performance-interface
+partial interface Performance {
+  void clearResourceTimings ();
+  void setResourceTimingBufferSize (unsigned long maxSize);
+              attribute EventHandler onresourcetimingbufferfull;
+};
+
+// https://w3c.github.io/navigation-timing/#extensions-to-the-performance-interface
+[Exposed=Window]
+partial interface Performance {
+  [SameObject]
+  readonly attribute PerformanceNavigationTiming timing;
+  [SameObject]
+  readonly attribute PerformanceNavigation navigation;
 };

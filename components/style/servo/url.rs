@@ -1,54 +1,56 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! Common handling for the specified value CSS url() values.
 
-use parser::ParserContext;
+use crate::parser::{Parse, ParserContext};
+use crate::stylesheets::CorsMode;
+use crate::values::computed::{Context, ToComputedValue};
+use cssparser::Parser;
+use servo_arc::Arc;
 use servo_url::ServoUrl;
-use std::fmt;
-// Note: We use std::sync::Arc rather than servo_arc::Arc here because the
-// nonzero optimization is important in keeping the size of SpecifiedUrl below
-// the threshold.
-use std::sync::Arc;
-use style_traits::{ToCss, ParseError};
-use values::computed::{Context, ToComputedValue, ComputedUrl};
+use std::fmt::{self, Write};
+use style_traits::{CssWriter, ParseError, ToCss};
 
-/// A specified url() value for servo.
+/// A CSS url() value for servo.
 ///
 /// Servo eagerly resolves SpecifiedUrls, which it can then take advantage of
 /// when computing values. In contrast, Gecko uses a different URL backend, so
 /// eagerly resolving with rust-url would be duplicated work.
 ///
 /// However, this approach is still not necessarily optimal: See
-/// https://bugzilla.mozilla.org/show_bug.cgi?id=1347435#c6
-#[derive(Clone, Debug, Deserialize, HeapSizeOf, Serialize)]
-pub struct SpecifiedUrl {
+/// <https://bugzilla.mozilla.org/show_bug.cgi?id=1347435#c6>
+///
+/// TODO(emilio): This should be shrunk by making CssUrl a wrapper type of an
+/// arc, and keep the serialization in that Arc. See gecko/url.rs for example.
+#[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize, SpecifiedValueInfo, ToShmem)]
+pub struct CssUrl {
     /// The original URI. This might be optional since we may insert computed
     /// values of images into the cascade directly, and we don't bother to
     /// convert their serialization.
     ///
     /// Refcounted since cloning this should be cheap and data: uris can be
     /// really large.
+    #[ignore_malloc_size_of = "Arc"]
     original: Option<Arc<String>>,
 
     /// The resolved value for the url, if valid.
     resolved: Option<ServoUrl>,
 }
 
-impl SpecifiedUrl {
+impl CssUrl {
     /// Try to parse a URL from a string value that is a valid CSS token for a
-    /// URL. Never fails - the API is only fallible to be compatible with the
-    /// gecko version.
-    pub fn parse_from_string<'a>(url: String,
-                                 context: &ParserContext)
-                                 -> Result<Self, ParseError<'a>> {
+    /// URL.
+    ///
+    /// FIXME(emilio): Should honor CorsMode.
+    pub fn parse_from_string(url: String, context: &ParserContext, _: CorsMode) -> Self {
         let serialization = Arc::new(url);
         let resolved = context.url_data.join(&serialization).ok();
-        Ok(SpecifiedUrl {
+        CssUrl {
             original: Some(serialization),
             resolved: resolved,
-        })
+        }
     }
 
     /// Returns true if the URL is definitely invalid. For Servo URLs, we can
@@ -86,7 +88,7 @@ impl SpecifiedUrl {
     /// Creates an already specified url value from an already resolved URL
     /// for insertion in the cascade.
     pub fn for_cascade(url: ServoUrl) -> Self {
-        SpecifiedUrl {
+        CssUrl {
             original: None,
             resolved: Some(url),
         }
@@ -94,14 +96,41 @@ impl SpecifiedUrl {
 
     /// Gets a new url from a string for unit tests.
     pub fn new_for_testing(url: &str) -> Self {
-        SpecifiedUrl {
+        CssUrl {
             original: Some(Arc::new(url.into())),
             resolved: ServoUrl::parse(url).ok(),
         }
     }
+
+    /// Parses a URL request and records that the corresponding request needs to
+    /// be CORS-enabled.
+    ///
+    /// This is only for shape images and masks in Gecko, thus unimplemented for
+    /// now so somebody notices when trying to do so.
+    pub fn parse_with_cors_mode<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+        cors_mode: CorsMode,
+    ) -> Result<Self, ParseError<'i>> {
+        let url = input.expect_url()?;
+        Ok(Self::parse_from_string(
+            url.as_ref().to_owned(),
+            context,
+            cors_mode,
+        ))
+    }
 }
 
-impl PartialEq for SpecifiedUrl {
+impl Parse for CssUrl {
+    fn parse<'i, 't>(
+        context: &ParserContext,
+        input: &mut Parser<'i, 't>,
+    ) -> Result<Self, ParseError<'i>> {
+        Self::parse_with_cors_mode(context, input, CorsMode::None)
+    }
+}
+
+impl PartialEq for CssUrl {
     fn eq(&self, other: &Self) -> bool {
         // TODO(emilio): maybe we care about equality of the specified values if
         // present? Seems not.
@@ -109,8 +138,13 @@ impl PartialEq for SpecifiedUrl {
     }
 }
 
-impl ToCss for SpecifiedUrl {
-    fn to_css<W>(&self, dest: &mut W) -> fmt::Result where W: fmt::Write {
+impl Eq for CssUrl {}
+
+impl ToCss for CssUrl {
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
+    {
         let string = match self.original {
             Some(ref original) => &**original,
             None => match self.resolved {
@@ -119,7 +153,7 @@ impl ToCss for SpecifiedUrl {
                 // user *and* it's an invalid url that has been transformed
                 // back to specified value via the "uncompute" functionality.
                 None => "about:invalid",
-            }
+            },
         };
 
         dest.write_str("url(")?;
@@ -127,6 +161,9 @@ impl ToCss for SpecifiedUrl {
         dest.write_str(")")
     }
 }
+
+/// A specified url() value for servo.
+pub type SpecifiedUrl = CssUrl;
 
 impl ToComputedValue for SpecifiedUrl {
     type ComputedValue = ComputedUrl;
@@ -141,7 +178,7 @@ impl ToComputedValue for SpecifiedUrl {
                 None => {
                     unreachable!("Found specified url with neither resolved or original URI!");
                 },
-            }
+            },
         }
     }
 
@@ -154,8 +191,48 @@ impl ToComputedValue for SpecifiedUrl {
             ComputedUrl::Invalid(ref url) => SpecifiedUrl {
                 original: Some(url.clone()),
                 resolved: None,
-            }
+            },
         }
     }
 }
 
+/// A specified image url() value for servo.
+pub type SpecifiedImageUrl = CssUrl;
+
+/// The computed value of a CSS `url()`, resolved relative to the stylesheet URL.
+#[derive(Clone, Debug, Deserialize, MallocSizeOf, PartialEq, Serialize)]
+pub enum ComputedUrl {
+    /// The `url()` was invalid or it wasn't specified by the user.
+    Invalid(#[ignore_malloc_size_of = "Arc"] Arc<String>),
+    /// The resolved `url()` relative to the stylesheet URL.
+    Valid(ServoUrl),
+}
+
+impl ComputedUrl {
+    /// Returns the resolved url if it was valid.
+    pub fn url(&self) -> Option<&ServoUrl> {
+        match *self {
+            ComputedUrl::Valid(ref url) => Some(url),
+            _ => None,
+        }
+    }
+}
+
+impl ToCss for ComputedUrl {
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
+    {
+        let string = match *self {
+            ComputedUrl::Valid(ref url) => url.as_str(),
+            ComputedUrl::Invalid(ref invalid_string) => invalid_string,
+        };
+
+        dest.write_str("url(")?;
+        string.to_css(dest)?;
+        dest.write_str(")")
+    }
+}
+
+/// The computed value of a CSS `url()` for image.
+pub type ComputedImageUrl = ComputedUrl;

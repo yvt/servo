@@ -1,10 +1,12 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // https://html.spec.whatwg.org/multipage/#htmltableelement
-[HTMLConstructor]
+[Exposed=Window]
 interface HTMLTableElement : HTMLElement {
+  [HTMLConstructor] constructor();
+
   [CEReactions]
            attribute HTMLTableCaptionElement? caption;
   HTMLTableCaptionElement createCaption();
@@ -48,8 +50,8 @@ partial interface HTMLTableElement {
   [CEReactions]
   attribute DOMString width;
 
-  [CEReactions, TreatNullAs=EmptyString]
-           attribute DOMString bgColor;
+  [CEReactions]
+           attribute [TreatNullAs=EmptyString] DOMString bgColor;
   // [CEReactions, TreatNullAs=EmptyString]
   //          attribute DOMString cellPadding;
   // [CEReactions, TreatNullAs=EmptyString]

@@ -1,18 +1,19 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // https://html.spec.whatwg.org/multipage/#htmliframeelement
-[HTMLConstructor]
+[Exposed=Window]
 interface HTMLIFrameElement : HTMLElement {
-  [CEReactions]
-           attribute DOMString src;
-  // [CEReactions]
-  //         attribute DOMString srcdoc;
+  [HTMLConstructor] constructor();
 
-  // https://github.com/servo/servo/issues/14453
-  // [CEReactions]
-  // attribute DOMString name;
+  [CEReactions]
+           attribute USVString src;
+  [CEReactions]
+           attribute DOMString srcdoc;
+
+  [CEReactions]
+  attribute DOMString name;
 
   [SameObject, PutForwards=value]
            readonly attribute DOMTokenList sandbox;
@@ -46,13 +47,3 @@ partial interface HTMLIFrameElement {
   // [CEReactions, TreatNullAs=EmptyString]
   // attribute DOMString marginWidth;
 };
-
-partial interface HTMLIFrameElement {
-    [CEReactions, Func="::dom::window::Window::global_is_mozbrowser"]
-    attribute boolean mozbrowser;
-
-    [CEReactions, Func="::dom::window::Window::global_is_mozbrowser"]
-    attribute boolean mozprivatebrowsing;
-};
-
-HTMLIFrameElement implements BrowserElement;

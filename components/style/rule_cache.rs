@@ -1,18 +1,19 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! A cache from rule node to computed values, in order to cache reset
 //! properties.
 
-use fnv::FnvHashMap;
-use logical_geometry::WritingMode;
-use properties::{ComputedValues, StyleBuilder};
-use rule_tree::StrongRuleNode;
-use selector_parser::PseudoElement;
+use crate::logical_geometry::WritingMode;
+use crate::properties::{ComputedValues, StyleBuilder};
+use crate::rule_tree::StrongRuleNode;
+use crate::selector_parser::PseudoElement;
+use crate::shared_lock::StylesheetGuards;
+use crate::values::computed::NonNegativeLength;
+use fxhash::FxHashMap;
 use servo_arc::Arc;
 use smallvec::SmallVec;
-use values::computed::NonNegativeLength;
 
 /// The conditions for caching and matching a style in the rule cache.
 #[derive(Clone, Debug, Default)]
@@ -52,7 +53,7 @@ impl RuleCacheConditions {
         }
 
         if let Some(fs) = self.font_size {
-            if style.get_font().clone_font_size() != fs {
+            if style.get_font().clone_font_size().size != fs {
                 return false;
             }
         }
@@ -70,15 +71,48 @@ impl RuleCacheConditions {
 /// A TLS cache from rules matched to computed values.
 pub struct RuleCache {
     // FIXME(emilio): Consider using LRUCache or something like that?
-    map: FnvHashMap<StrongRuleNode, SmallVec<[(RuleCacheConditions, Arc<ComputedValues>); 1]>>,
+    map: FxHashMap<StrongRuleNode, SmallVec<[(RuleCacheConditions, Arc<ComputedValues>); 1]>>,
 }
 
 impl RuleCache {
     /// Creates an empty `RuleCache`.
     pub fn new() -> Self {
         Self {
-            map: FnvHashMap::default(),
+            map: FxHashMap::default(),
         }
+    }
+
+    /// Walk the rule tree and return a rule node for using as the key
+    /// for rule cache.
+    ///
+    /// It currently skips a rule node when it is neither from a style
+    /// rule, nor containing any declaration of reset property. We don't
+    /// skip style rule so that we don't need to walk a long way in the
+    /// worst case. Skipping declarations rule nodes should be enough
+    /// to address common cases that rule cache would fail to share
+    /// when using the rule node directly, like preshint, style attrs,
+    /// and animations.
+    fn get_rule_node_for_cache<'r>(
+        guards: &StylesheetGuards,
+        mut rule_node: Option<&'r StrongRuleNode>,
+    ) -> Option<&'r StrongRuleNode> {
+        while let Some(node) = rule_node {
+            match node.style_source() {
+                Some(s) => match s.as_declarations() {
+                    Some(decls) => {
+                        let cascade_level = node.cascade_level();
+                        let decls = decls.read_with(cascade_level.guard(guards));
+                        if decls.contains_any_reset() {
+                            break;
+                        }
+                    },
+                    None => break,
+                },
+                None => {},
+            }
+            rule_node = node.parent();
+        }
+        rule_node
     }
 
     /// Finds a node in the properties matched cache.
@@ -87,35 +121,30 @@ impl RuleCache {
     /// already applied.
     pub fn find(
         &self,
+        guards: &StylesheetGuards,
         builder_with_early_props: &StyleBuilder,
     ) -> Option<&ComputedValues> {
-        if builder_with_early_props.is_style_if_visited() {
-            // FIXME(emilio): We can probably do better, does it matter much?
-            return None;
-        }
-
         // A pseudo-element with property restrictions can result in different
         // computed values if it's also used for a non-pseudo.
-        if builder_with_early_props.pseudo
-           .and_then(|p| p.property_restriction())
-           .is_some() {
+        if builder_with_early_props
+            .pseudo
+            .and_then(|p| p.property_restriction())
+            .is_some()
+        {
             return None;
         }
 
-        let rules = match builder_with_early_props.rules {
-            Some(ref rules) => rules,
-            None => return None,
-        };
+        let rules = builder_with_early_props.rules.as_ref();
+        let rules = Self::get_rule_node_for_cache(guards, rules)?;
+        let cached_values = self.map.get(rules)?;
 
-        self.map.get(rules).and_then(|cached_values| {
-            for &(ref conditions, ref values) in cached_values.iter() {
-                if conditions.matches(builder_with_early_props) {
-                    debug!("Using cached reset style with conditions {:?}", conditions);
-                    return Some(&**values)
-                }
+        for &(ref conditions, ref values) in cached_values.iter() {
+            if conditions.matches(builder_with_early_props) {
+                debug!("Using cached reset style with conditions {:?}", conditions);
+                return Some(&**values);
             }
-            None
-        })
+        }
+        None
     }
 
     /// Inserts a node into the rules cache if possible.
@@ -123,16 +152,12 @@ impl RuleCache {
     /// Returns whether the style was inserted into the cache.
     pub fn insert_if_possible(
         &mut self,
+        guards: &StylesheetGuards,
         style: &Arc<ComputedValues>,
         pseudo: Option<&PseudoElement>,
         conditions: &RuleCacheConditions,
     ) -> bool {
         if !conditions.cacheable() {
-            return false;
-        }
-
-        if style.is_style_if_visited() {
-            // FIXME(emilio): We can probably do better, does it matter much?
             return false;
         }
 
@@ -142,12 +167,16 @@ impl RuleCache {
             return false;
         }
 
-        let rules = match style.rules {
-            Some(ref r) => r.clone(),
+        let rules = style.rules.as_ref();
+        let rules = match Self::get_rule_node_for_cache(guards, rules) {
+            Some(r) => r.clone(),
             None => return false,
         };
 
-        debug!("Inserting cached reset style with conditions {:?}", conditions);
+        debug!(
+            "Inserting cached reset style with conditions {:?}",
+            conditions
+        );
         self.map
             .entry(rules)
             .or_insert_with(SmallVec::new)
@@ -155,5 +184,4 @@ impl RuleCache {
 
         true
     }
-
 }

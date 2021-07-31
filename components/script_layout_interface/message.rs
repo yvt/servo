@@ -1,28 +1,34 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use {OpaqueStyleAndLayoutData, TrustedNodeAddress, PendingImage};
+use crate::rpc::LayoutRPC;
+use crate::{PendingImage, TrustedNodeAddress};
 use app_units::Au;
-use euclid::{Point2D, Rect};
+use crossbeam_channel::{Receiver, Sender};
+use euclid::default::{Point2D, Rect};
 use gfx_traits::Epoch;
 use ipc_channel::ipc::{IpcReceiver, IpcSender};
 use metrics::PaintTimeMetrics;
-use msg::constellation_msg::PipelineId;
+use msg::constellation_msg::{BackgroundHangMonitorRegister, BrowsingContextId, PipelineId};
 use net_traits::image_cache::ImageCache;
 use profile_traits::mem::ReportsChan;
-use rpc::LayoutRPC;
-use script_traits::{ConstellationControlMsg, LayoutControlMsg, LayoutMsg as ConstellationMsg};
-use script_traits::{ScrollState, UntrustedNodeAddress, WindowSizeData};
 use script_traits::Painter;
+use script_traits::{
+    ConstellationControlMsg, LayoutControlMsg, LayoutMsg as ConstellationMsg, ScrollState,
+    WindowSizeData,
+};
 use servo_arc::Arc as ServoArc;
 use servo_atoms::Atom;
-use servo_url::ServoUrl;
+use servo_url::{ImmutableOrigin, ServoUrl};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, Sender};
-use style::context::{QuirksMode, ReflowGoal};
+use style::animation::DocumentAnimationSet;
+use style::context::QuirksMode;
+use style::dom::OpaqueNode;
+use style::invalidation::element::restyle_hints::RestyleHint;
 use style::properties::PropertyId;
-use style::selector_parser::PseudoElement;
+use style::selector_parser::{PseudoElement, RestyleDamage, Snapshot};
 use style::stylesheets::Stylesheet;
 
 /// Asynchronous messages that script can send to layout.
@@ -42,21 +48,7 @@ pub enum Msg {
     Reflow(ScriptReflow),
 
     /// Get an RPC interface.
-    GetRPC(Sender<Box<LayoutRPC + Send>>),
-
-    /// Requests that the layout thread render the next frame of all animations.
-    TickAnimations,
-
-    /// Updates layout's timer for animation testing from script.
-    ///
-    /// The inner field is the number of *milliseconds* to advance, and the bool
-    /// field is whether animations should be force-ticked.
-    AdvanceClockMs(i32, bool),
-
-    /// Destroys layout data associated with a DOM node.
-    ///
-    /// TODO(pcwalton): Maybe think about batching to avoid message traffic.
-    ReapStyleAndLayoutData(OpaqueStyleAndLayoutData),
+    GetRPC(Sender<Box<dyn LayoutRPC + Send>>),
 
     /// Requests that the layout thread measure its memory usage. The resulting reports are sent back
     /// via the supplied channel.
@@ -81,7 +73,7 @@ pub enum Msg {
     /// Creates a new layout thread.
     ///
     /// This basically exists to keep the script-layout dependency one-way.
-    CreateLayoutThread(NewLayoutThreadInfo),
+    CreateLayoutThread(LayoutThreadInit),
 
     /// Set the final Url.
     SetFinalUrl(ServoUrl),
@@ -94,35 +86,97 @@ pub enum Msg {
     UpdateScrollStateFromScript(ScrollState),
 
     /// Tells layout that script has added some paint worklet modules.
-    RegisterPaint(Atom, Vec<Atom>, Box<Painter>),
+    RegisterPaint(Atom, Vec<Atom>, Box<dyn Painter>),
 
     /// Send to layout the precise time when the navigation started.
-    SetNavigationStart(f64),
+    SetNavigationStart(u64),
 }
 
+#[derive(Debug, PartialEq)]
+pub enum NodesFromPointQueryType {
+    All,
+    Topmost,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum QueryMsg {
+    ContentBoxQuery(OpaqueNode),
+    ContentBoxesQuery(OpaqueNode),
+    ClientRectQuery(OpaqueNode),
+    NodeScrollGeometryQuery(OpaqueNode),
+    OffsetParentQuery(OpaqueNode),
+    TextIndexQuery(OpaqueNode, Point2D<f32>),
+    NodesFromPointQuery(Point2D<f32>, NodesFromPointQueryType),
+
+    // FIXME(nox): The following queries use the TrustedNodeAddress to
+    // access actual DOM nodes, but those values can be constructed from
+    // garbage values such as `0xdeadbeef as *const _`, this is unsound.
+    NodeScrollIdQuery(TrustedNodeAddress),
+    ResolvedStyleQuery(TrustedNodeAddress, Option<PseudoElement>, PropertyId),
+    StyleQuery,
+    ElementInnerTextQuery(TrustedNodeAddress),
+    ResolvedFontStyleQuery(TrustedNodeAddress, PropertyId, String),
+    InnerWindowDimensionsQuery(BrowsingContextId),
+}
 
 /// Any query to perform with this reflow.
 #[derive(Debug, PartialEq)]
-pub enum ReflowQueryType {
-    NoQuery,
-    ContentBoxQuery(TrustedNodeAddress),
-    ContentBoxesQuery(TrustedNodeAddress),
-    NodeOverflowQuery(TrustedNodeAddress),
-    HitTestQuery(Point2D<f32>, bool),
-    NodeScrollRootIdQuery(TrustedNodeAddress),
-    NodeGeometryQuery(TrustedNodeAddress),
-    NodeScrollGeometryQuery(TrustedNodeAddress),
-    ResolvedStyleQuery(TrustedNodeAddress, Option<PseudoElement>, PropertyId),
-    OffsetParentQuery(TrustedNodeAddress),
-    MarginStyleQuery(TrustedNodeAddress),
-    TextIndexQuery(TrustedNodeAddress, i32, i32),
-    NodesFromPoint(Point2D<f32>),
+pub enum ReflowGoal {
+    Full,
+    TickAnimations,
+    LayoutQuery(QueryMsg, u64),
+}
+
+impl ReflowGoal {
+    /// Returns true if the given ReflowQuery needs a full, up-to-date display list to
+    /// be present or false if it only needs stacking-relative positions.
+    pub fn needs_display_list(&self) -> bool {
+        match *self {
+            ReflowGoal::Full | ReflowGoal::TickAnimations => true,
+            ReflowGoal::LayoutQuery(ref querymsg, _) => match *querymsg {
+                QueryMsg::NodesFromPointQuery(..) |
+                QueryMsg::TextIndexQuery(..) |
+                QueryMsg::InnerWindowDimensionsQuery(_) |
+                QueryMsg::ElementInnerTextQuery(_) => true,
+                QueryMsg::ContentBoxQuery(_) |
+                QueryMsg::ContentBoxesQuery(_) |
+                QueryMsg::ClientRectQuery(_) |
+                QueryMsg::NodeScrollGeometryQuery(_) |
+                QueryMsg::NodeScrollIdQuery(_) |
+                QueryMsg::ResolvedStyleQuery(..) |
+                QueryMsg::ResolvedFontStyleQuery(..) |
+                QueryMsg::OffsetParentQuery(_) |
+                QueryMsg::StyleQuery => false,
+            },
+        }
+    }
+
+    /// Returns true if the given ReflowQuery needs its display list send to WebRender or
+    /// false if a layout_thread display list is sufficient.
+    pub fn needs_display(&self) -> bool {
+        match *self {
+            ReflowGoal::Full | ReflowGoal::TickAnimations => true,
+            ReflowGoal::LayoutQuery(ref querymsg, _) => match *querymsg {
+                QueryMsg::NodesFromPointQuery(..) |
+                QueryMsg::TextIndexQuery(..) |
+                QueryMsg::ElementInnerTextQuery(_) => true,
+                QueryMsg::ContentBoxQuery(_) |
+                QueryMsg::ContentBoxesQuery(_) |
+                QueryMsg::ClientRectQuery(_) |
+                QueryMsg::NodeScrollGeometryQuery(_) |
+                QueryMsg::NodeScrollIdQuery(_) |
+                QueryMsg::ResolvedStyleQuery(..) |
+                QueryMsg::ResolvedFontStyleQuery(..) |
+                QueryMsg::OffsetParentQuery(_) |
+                QueryMsg::InnerWindowDimensionsQuery(_) |
+                QueryMsg::StyleQuery => false,
+            },
+        }
+    }
 }
 
 /// Information needed for a reflow.
 pub struct Reflow {
-    /// The goal of reflow: either to render to the screen or to flush layout info for script.
-    pub goal: ReflowGoal,
     ///  A clipping rectangle for the page, an enlarged rectangle containing the viewport.
     pub page_clip_rect: Rect<Au>,
 }
@@ -132,8 +186,6 @@ pub struct Reflow {
 pub struct ReflowComplete {
     /// The list of images that were encountered that are in progress.
     pub pending_images: Vec<PendingImage>,
-    /// The list of nodes that initiated a CSS transition.
-    pub newly_transitioning_nodes: Vec<UntrustedNodeAddress>,
 }
 
 /// Information needed for a script-initiated reflow.
@@ -142,28 +194,65 @@ pub struct ScriptReflow {
     pub reflow_info: Reflow,
     /// The document node.
     pub document: TrustedNodeAddress,
+    /// The dirty root from which to restyle.
+    pub dirty_root: Option<TrustedNodeAddress>,
     /// Whether the document's stylesheets have changed since the last script reflow.
     pub stylesheets_changed: bool,
     /// The current window size.
     pub window_size: WindowSizeData,
     /// The channel that we send a notification to.
     pub script_join_chan: Sender<ReflowComplete>,
-    /// The type of query if any to perform during this reflow.
-    pub query_type: ReflowQueryType,
+    /// The goal of this reflow.
+    pub reflow_goal: ReflowGoal,
     /// The number of objects in the dom #10110
     pub dom_count: u32,
+    /// The current window origin
+    pub origin: ImmutableOrigin,
+    /// Restyle snapshot map.
+    pub pending_restyles: Vec<(TrustedNodeAddress, PendingRestyle)>,
+    /// The current animation timeline value.
+    pub animation_timeline_value: f64,
+    /// The set of animations for this document.
+    pub animations: DocumentAnimationSet,
 }
 
-pub struct NewLayoutThreadInfo {
+pub struct LayoutThreadInit {
     pub id: PipelineId,
     pub url: ServoUrl,
     pub is_parent: bool,
     pub layout_pair: (Sender<Msg>, Receiver<Msg>),
     pub pipeline_port: IpcReceiver<LayoutControlMsg>,
+    pub background_hang_monitor_register: Box<dyn BackgroundHangMonitorRegister>,
     pub constellation_chan: IpcSender<ConstellationMsg>,
     pub script_chan: IpcSender<ConstellationControlMsg>,
-    pub image_cache: Arc<ImageCache>,
-    pub content_process_shutdown_chan: Option<IpcSender<()>>,
-    pub layout_threads: usize,
+    pub image_cache: Arc<dyn ImageCache>,
     pub paint_time_metrics: PaintTimeMetrics,
+    pub layout_is_busy: Arc<AtomicBool>,
+    pub window_size: WindowSizeData,
+}
+
+/// A pending restyle.
+#[derive(Debug, MallocSizeOf)]
+pub struct PendingRestyle {
+    /// If this element had a state or attribute change since the last restyle, track
+    /// the original condition of the element.
+    pub snapshot: Option<Snapshot>,
+
+    /// Any explicit restyles hints that have been accumulated for this element.
+    pub hint: RestyleHint,
+
+    /// Any explicit restyles damage that have been accumulated for this element.
+    pub damage: RestyleDamage,
+}
+
+impl PendingRestyle {
+    /// Creates a new empty pending restyle.
+    #[inline]
+    pub fn new() -> Self {
+        PendingRestyle {
+            snapshot: None,
+            hint: RestyleHint::empty(),
+            damage: RestyleDamage::empty(),
+        }
+    }
 }

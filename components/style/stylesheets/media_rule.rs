@@ -1,25 +1,27 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! An [`@media`][media] urle.
 //!
 //! [media]: https://drafts.csswg.org/css-conditional/#at-ruledef-media
 
+use crate::media_queries::MediaList;
+use crate::shared_lock::{DeepCloneParams, DeepCloneWithLock, Locked};
+use crate::shared_lock::{SharedRwLock, SharedRwLockReadGuard, ToCssWithGuard};
+use crate::str::CssStringWriter;
+use crate::stylesheets::CssRules;
 use cssparser::SourceLocation;
 #[cfg(feature = "gecko")]
 use malloc_size_of::{MallocSizeOfOps, MallocUnconditionalShallowSizeOf};
-use media_queries::MediaList;
 use servo_arc::Arc;
-use shared_lock::{DeepCloneParams, DeepCloneWithLock, Locked, SharedRwLock, SharedRwLockReadGuard, ToCssWithGuard};
-use std::fmt;
-use style_traits::ToCss;
-use stylesheets::CssRules;
+use std::fmt::{self, Write};
+use style_traits::{CssWriter, ToCss};
 
 /// An [`@media`][media] urle.
 ///
 /// [media]: https://drafts.csswg.org/css-conditional/#at-ruledef-media
-#[derive(Debug)]
+#[derive(Debug, ToShmem)]
 pub struct MediaRule {
     /// The list of media queries used by this media rule.
     pub media_queries: Arc<Locked<MediaList>>,
@@ -42,16 +44,12 @@ impl MediaRule {
 impl ToCssWithGuard for MediaRule {
     // Serialization of MediaRule is not specced.
     // https://drafts.csswg.org/cssom/#serialize-a-css-rule CSSMediaRule
-    fn to_css<W>(&self, guard: &SharedRwLockReadGuard, dest: &mut W) -> fmt::Result
-    where W: fmt::Write {
+    fn to_css(&self, guard: &SharedRwLockReadGuard, dest: &mut CssStringWriter) -> fmt::Result {
         dest.write_str("@media ")?;
-        self.media_queries.read_with(guard).to_css(dest)?;
-        dest.write_str(" {")?;
-        for rule in self.rules.read_with(guard).0.iter() {
-            dest.write_str(" ")?;
-            rule.to_css(guard, dest)?;
-        }
-        dest.write_str(" }")
+        self.media_queries
+            .read_with(guard)
+            .to_css(&mut CssWriter::new(dest))?;
+        self.rules.read_with(guard).to_css_block(guard, dest)
     }
 }
 

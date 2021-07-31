@@ -1,22 +1,27 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! Types used to report parsing errors.
 
 #![deny(missing_docs)]
 
-use cssparser::{BasicParseError, Token, SourceLocation};
-use cssparser::ParseError as CssParseError;
-use log;
+use crate::selector_parser::SelectorImpl;
+use crate::stylesheets::UrlExtraData;
+use cssparser::{BasicParseErrorKind, ParseErrorKind, SourceLocation, Token};
+use selectors::SelectorList;
 use std::fmt;
 use style_traits::ParseError;
-use stylesheets::UrlExtraData;
 
 /// Errors that can be encountered while parsing CSS.
+#[derive(Debug)]
 pub enum ContextualParseError<'a> {
     /// A property declaration was not recognized.
-    UnsupportedPropertyDeclaration(&'a str, ParseError<'a>),
+    UnsupportedPropertyDeclaration(
+        &'a str,
+        ParseError<'a>,
+        Option<&'a SelectorList<SelectorImpl>>,
+    ),
     /// A font face descriptor was not recognized.
     UnsupportedFontFaceDescriptor(&'a str, ParseError<'a>),
     /// A font feature values descriptor was not recognized.
@@ -47,6 +52,8 @@ pub enum ContextualParseError<'a> {
     InvalidCounterStyleExtendsWithAdditiveSymbols,
     /// A media rule was invalid for some reason.
     InvalidMediaRule(&'a str, ParseError<'a>),
+    /// A value was not recognized.
+    UnsupportedValue(&'a str, ParseError<'a>),
 }
 
 impl<'a> fmt::Display for ContextualParseError<'a> {
@@ -60,11 +67,19 @@ impl<'a> fmt::Display for ContextualParseError<'a> {
                 Token::QuotedString(ref s) => write!(f, "quoted string \"{}\"", s),
                 Token::UnquotedUrl(ref u) => write!(f, "url {}", u),
                 Token::Delim(ref d) => write!(f, "delimiter {}", d),
-                Token::Number { int_value: Some(i), .. } => write!(f, "number {}", i),
+                Token::Number {
+                    int_value: Some(i), ..
+                } => write!(f, "number {}", i),
                 Token::Number { value, .. } => write!(f, "number {}", value),
-                Token::Percentage { int_value: Some(i), .. } => write!(f, "percentage {}", i),
-                Token::Percentage { unit_value, .. } => write!(f, "percentage {}", unit_value * 100.),
-                Token::Dimension { value, ref unit, .. } => write!(f, "dimension {}{}", value, unit),
+                Token::Percentage {
+                    int_value: Some(i), ..
+                } => write!(f, "percentage {}", i),
+                Token::Percentage { unit_value, .. } => {
+                    write!(f, "percentage {}", unit_value * 100.)
+                },
+                Token::Dimension {
+                    value, ref unit, ..
+                } => write!(f, "dimension {}{}", value, unit),
                 Token::WhiteSpace(_) => write!(f, "whitespace"),
                 Token::Comment(_) => write!(f, "comment"),
                 Token::Colon => write!(f, "colon (:)"),
@@ -75,7 +90,6 @@ impl<'a> fmt::Display for ContextualParseError<'a> {
                 Token::PrefixMatch => write!(f, "prefix match (^=)"),
                 Token::SuffixMatch => write!(f, "suffix match ($=)"),
                 Token::SubstringMatch => write!(f, "substring match (*=)"),
-                Token::Column => write!(f, "column (||)"),
                 Token::CDO => write!(f, "CDO (<!--)"),
                 Token::CDC => write!(f, "CDC (-->)"),
                 Token::Function(ref name) => write!(f, "function {}", name),
@@ -91,89 +105,111 @@ impl<'a> fmt::Display for ContextualParseError<'a> {
         }
 
         fn parse_error_to_str(err: &ParseError, f: &mut fmt::Formatter) -> fmt::Result {
-            match *err {
-                CssParseError::Basic(BasicParseError::UnexpectedToken(ref t)) => {
+            match err.kind {
+                ParseErrorKind::Basic(BasicParseErrorKind::UnexpectedToken(ref t)) => {
                     write!(f, "found unexpected ")?;
                     token_to_str(t, f)
-                }
-                CssParseError::Basic(BasicParseError::EndOfInput) => {
+                },
+                ParseErrorKind::Basic(BasicParseErrorKind::EndOfInput) => {
                     write!(f, "unexpected end of input")
-                }
-                CssParseError::Basic(BasicParseError::AtRuleInvalid(ref i)) => {
+                },
+                ParseErrorKind::Basic(BasicParseErrorKind::AtRuleInvalid(ref i)) => {
                     write!(f, "@ rule invalid: {}", i)
-                }
-                CssParseError::Basic(BasicParseError::AtRuleBodyInvalid) => {
+                },
+                ParseErrorKind::Basic(BasicParseErrorKind::AtRuleBodyInvalid) => {
                     write!(f, "@ rule invalid")
-                }
-                CssParseError::Basic(BasicParseError::QualifiedRuleInvalid) => {
+                },
+                ParseErrorKind::Basic(BasicParseErrorKind::QualifiedRuleInvalid) => {
                     write!(f, "qualified rule invalid")
-                }
-                CssParseError::Custom(ref err) => {
-                    write!(f, "{:?}", err)
-                }
+                },
+                ParseErrorKind::Custom(ref err) => write!(f, "{:?}", err),
             }
         }
 
         match *self {
-            ContextualParseError::UnsupportedPropertyDeclaration(decl, ref err) => {
+            ContextualParseError::UnsupportedPropertyDeclaration(decl, ref err, _selectors) => {
                 write!(f, "Unsupported property declaration: '{}', ", decl)?;
                 parse_error_to_str(err, f)
-            }
+            },
             ContextualParseError::UnsupportedFontFaceDescriptor(decl, ref err) => {
-                write!(f, "Unsupported @font-face descriptor declaration: '{}', ", decl)?;
+                write!(
+                    f,
+                    "Unsupported @font-face descriptor declaration: '{}', ",
+                    decl
+                )?;
                 parse_error_to_str(err, f)
-            }
+            },
             ContextualParseError::UnsupportedFontFeatureValuesDescriptor(decl, ref err) => {
-                write!(f, "Unsupported @font-feature-values descriptor declaration: '{}', ", decl)?;
+                write!(
+                    f,
+                    "Unsupported @font-feature-values descriptor declaration: '{}', ",
+                    decl
+                )?;
                 parse_error_to_str(err, f)
-            }
+            },
             ContextualParseError::InvalidKeyframeRule(rule, ref err) => {
                 write!(f, "Invalid keyframe rule: '{}', ", rule)?;
                 parse_error_to_str(err, f)
-            }
+            },
             ContextualParseError::InvalidFontFeatureValuesRule(rule, ref err) => {
                 write!(f, "Invalid font feature value rule: '{}', ", rule)?;
                 parse_error_to_str(err, f)
-            }
+            },
             ContextualParseError::UnsupportedKeyframePropertyDeclaration(decl, ref err) => {
                 write!(f, "Unsupported keyframe property declaration: '{}', ", decl)?;
                 parse_error_to_str(err, f)
-            }
+            },
             ContextualParseError::InvalidRule(rule, ref err) => {
                 write!(f, "Invalid rule: '{}', ", rule)?;
                 parse_error_to_str(err, f)
-            }
+            },
             ContextualParseError::UnsupportedRule(rule, ref err) => {
                 write!(f, "Unsupported rule: '{}', ", rule)?;
                 parse_error_to_str(err, f)
-            }
+            },
             ContextualParseError::UnsupportedViewportDescriptorDeclaration(decl, ref err) => {
-                write!(f, "Unsupported @viewport descriptor declaration: '{}', ", decl)?;
+                write!(
+                    f,
+                    "Unsupported @viewport descriptor declaration: '{}', ",
+                    decl
+                )?;
                 parse_error_to_str(err, f)
-            }
+            },
             ContextualParseError::UnsupportedCounterStyleDescriptorDeclaration(decl, ref err) => {
-                write!(f, "Unsupported @counter-style descriptor declaration: '{}', ", decl)?;
+                write!(
+                    f,
+                    "Unsupported @counter-style descriptor declaration: '{}', ",
+                    decl
+                )?;
                 parse_error_to_str(err, f)
-            }
-            ContextualParseError::InvalidCounterStyleWithoutSymbols(ref system) => {
-                write!(f, "Invalid @counter-style rule: 'system: {}' without 'symbols'", system)
-            }
-            ContextualParseError::InvalidCounterStyleNotEnoughSymbols(ref system) => {
-                write!(f, "Invalid @counter-style rule: 'system: {}' less than two 'symbols'", system)
-            }
-            ContextualParseError::InvalidCounterStyleWithoutAdditiveSymbols => {
-                write!(f, "Invalid @counter-style rule: 'system: additive' without 'additive-symbols'")
-            }
-            ContextualParseError::InvalidCounterStyleExtendsWithSymbols => {
-                write!(f, "Invalid @counter-style rule: 'system: extends …' with 'symbols'")
-            }
-            ContextualParseError::InvalidCounterStyleExtendsWithAdditiveSymbols => {
-                write!(f, "Invalid @counter-style rule: 'system: extends …' with 'additive-symbols'")
-            }
+            },
+            ContextualParseError::InvalidCounterStyleWithoutSymbols(ref system) => write!(
+                f,
+                "Invalid @counter-style rule: 'system: {}' without 'symbols'",
+                system
+            ),
+            ContextualParseError::InvalidCounterStyleNotEnoughSymbols(ref system) => write!(
+                f,
+                "Invalid @counter-style rule: 'system: {}' less than two 'symbols'",
+                system
+            ),
+            ContextualParseError::InvalidCounterStyleWithoutAdditiveSymbols => write!(
+                f,
+                "Invalid @counter-style rule: 'system: additive' without 'additive-symbols'"
+            ),
+            ContextualParseError::InvalidCounterStyleExtendsWithSymbols => write!(
+                f,
+                "Invalid @counter-style rule: 'system: extends …' with 'symbols'"
+            ),
+            ContextualParseError::InvalidCounterStyleExtendsWithAdditiveSymbols => write!(
+                f,
+                "Invalid @counter-style rule: 'system: extends …' with 'additive-symbols'"
+            ),
             ContextualParseError::InvalidMediaRule(media_rule, ref err) => {
                 write!(f, "Invalid media rule: {}, ", media_rule)?;
                 parse_error_to_str(err, f)
-            }
+            },
+            ContextualParseError::UnsupportedValue(_value, ref err) => parse_error_to_str(err, f),
         }
     }
 }
@@ -184,10 +220,12 @@ pub trait ParseErrorReporter {
     ///
     /// Returns the current input being parsed, the source location it was
     /// reported from, and a message.
-    fn report_error(&self,
-                    url: &UrlExtraData,
-                    location: SourceLocation,
-                    error: ContextualParseError);
+    fn report_error(
+        &self,
+        url: &UrlExtraData,
+        location: SourceLocation,
+        error: ContextualParseError,
+    );
 }
 
 /// An error reporter that uses [the `log` crate](https://github.com/rust-lang-nursery/log)
@@ -196,27 +234,25 @@ pub trait ParseErrorReporter {
 /// This logging is silent by default, and can be enabled with a `RUST_LOG=style=info`
 /// environment variable.
 /// (See [`env_logger`](https://rust-lang-nursery.github.io/log/env_logger/).)
+#[cfg(feature = "servo")]
 pub struct RustLogReporter;
 
+#[cfg(feature = "servo")]
 impl ParseErrorReporter for RustLogReporter {
-    fn report_error(&self,
-                    url: &UrlExtraData,
-                    location: SourceLocation,
-                    error: ContextualParseError) {
-        if log_enabled!(log::LogLevel::Info) {
-            info!("Url:\t{}\n{}:{} {}", url.as_str(), location.line, location.column, error)
+    fn report_error(
+        &self,
+        url: &UrlExtraData,
+        location: SourceLocation,
+        error: ContextualParseError,
+    ) {
+        if log_enabled!(log::Level::Info) {
+            info!(
+                "Url:\t{}\n{}:{} {}",
+                url.as_str(),
+                location.line,
+                location.column,
+                error
+            )
         }
-    }
-}
-
-/// Error reporter which silently forgets errors
-pub struct NullReporter;
-
-impl ParseErrorReporter for NullReporter {
-    fn report_error(&self,
-                    _url: &UrlExtraData,
-                    _location: SourceLocation,
-                    _error: ContextualParseError) {
-        // do nothing
     }
 }

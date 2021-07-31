@@ -1,6 +1,6 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! Gecko's definition of a pseudo-element.
 //!
@@ -8,27 +8,43 @@
 //! `pseudo_element_definition.mako.rs`. If you touch that file, you probably
 //! need to update the checked-in files for Servo.
 
-use cssparser::{ToCss, serialize_identifier};
-use gecko_bindings::structs::{self, CSSPseudoElementType};
-use properties::{PropertyFlags, APPLIES_TO_FIRST_LETTER, APPLIES_TO_FIRST_LINE};
-use properties::APPLIES_TO_PLACEHOLDER;
-use properties::ComputedValues;
-use properties::longhands::display::computed_value as display;
-use selector_parser::{NonTSPseudoClass, PseudoElementCascadeType, SelectorImpl};
+use crate::gecko_bindings::structs::{self, PseudoStyleType};
+use crate::properties::longhands::display::computed_value::T as Display;
+use crate::properties::{ComputedValues, PropertyFlags};
+use crate::selector_parser::{PseudoElementCascadeType, SelectorImpl};
+use crate::str::{starts_with_ignore_ascii_case, string_as_ascii_lowercase};
+use crate::string_cache::Atom;
+use crate::values::serialize_atom_identifier;
+use cssparser::ToCss;
 use std::fmt;
-use string_cache::Atom;
+use thin_slice::ThinBoxedSlice;
 
-include!(concat!(env!("OUT_DIR"), "/gecko/pseudo_element_definition.rs"));
+include!(concat!(
+    env!("OUT_DIR"),
+    "/gecko/pseudo_element_definition.rs"
+));
 
 impl ::selectors::parser::PseudoElement for PseudoElement {
     type Impl = SelectorImpl;
 
-    fn supports_pseudo_class(&self, pseudo_class: &NonTSPseudoClass) -> bool {
-        if !self.supports_user_action_state() {
-            return false;
-        }
+    // ::slotted() should support all tree-abiding pseudo-elements, see
+    // https://drafts.csswg.org/css-scoping/#slotted-pseudo
+    // https://drafts.csswg.org/css-pseudo-4/#treelike
+    #[inline]
+    fn valid_after_slotted(&self) -> bool {
+        matches!(
+            *self,
+            PseudoElement::Before |
+                PseudoElement::After |
+                PseudoElement::Marker |
+                PseudoElement::Placeholder |
+                PseudoElement::FileSelectorButton
+        )
+    }
 
-        return pseudo_class.is_safe_user_action_state();
+    #[inline]
+    fn accepts_state_pseudo_classes(&self) -> bool {
+        self.supports_user_action_state()
     }
 }
 
@@ -43,11 +59,11 @@ impl PseudoElement {
     pub fn cascade_type(&self) -> PseudoElementCascadeType {
         if self.is_eager() {
             debug_assert!(!self.is_anon_box());
-            return PseudoElementCascadeType::Eager
+            return PseudoElementCascadeType::Eager;
         }
 
-        if self.is_anon_box() {
-            return PseudoElementCascadeType::Precomputed
+        if self.is_precomputed() {
+            return PseudoElementCascadeType::Precomputed;
         }
 
         PseudoElementCascadeType::Lazy
@@ -65,7 +81,9 @@ impl PseudoElement {
     /// Gets the canonical index of this eagerly-cascaded pseudo-element.
     #[inline]
     pub fn eager_index(&self) -> usize {
-        EAGER_PSEUDOS.iter().position(|p| p == self)
+        EAGER_PSEUDOS
+            .iter()
+            .position(|p| p == self)
             .expect("Not an eager pseudo")
     }
 
@@ -73,6 +91,12 @@ impl PseudoElement {
     #[inline]
     pub fn from_eager_index(i: usize) -> Self {
         EAGER_PSEUDOS[i].clone()
+    }
+
+    /// Whether the current pseudo element is animatable.
+    #[inline]
+    pub fn is_animatable(&self) -> bool {
+        matches!(*self, Self::Before | Self::After | Self::Marker)
     }
 
     /// Whether the current pseudo element is ::before or ::after.
@@ -93,6 +117,18 @@ impl PseudoElement {
         *self == PseudoElement::After
     }
 
+    /// Whether this pseudo-element is the ::marker pseudo.
+    #[inline]
+    pub fn is_marker(&self) -> bool {
+        *self == PseudoElement::Marker
+    }
+
+    /// Whether this pseudo-element is the ::selection pseudo.
+    #[inline]
+    pub fn is_selection(&self) -> bool {
+        *self == PseudoElement::Selection
+    }
+
     /// Whether this pseudo-element is ::first-letter.
     #[inline]
     pub fn is_first_letter(&self) -> bool {
@@ -105,10 +141,10 @@ impl PseudoElement {
         *self == PseudoElement::FirstLine
     }
 
-    /// Whether this pseudo-element is ::-moz-fieldset-content.
+    /// Whether this pseudo-element is the ::-moz-color-swatch pseudo.
     #[inline]
-    pub fn is_fieldset_content(&self) -> bool {
-        *self == PseudoElement::FieldsetContent
+    pub fn is_color_swatch(&self) -> bool {
+        *self == PseudoElement::MozColorSwatch
     }
 
     /// Whether this pseudo-element is lazily-cascaded.
@@ -117,57 +153,63 @@ impl PseudoElement {
         !self.is_eager() && !self.is_precomputed()
     }
 
-    /// Whether this pseudo-element is web-exposed.
-    pub fn exposed_in_non_ua_sheets(&self) -> bool {
-        (self.flags() & structs::CSS_PSEUDO_ELEMENT_UA_SHEET_ONLY) == 0
-    }
-
     /// Whether this pseudo-element supports user action selectors.
     pub fn supports_user_action_state(&self) -> bool {
         (self.flags() & structs::CSS_PSEUDO_ELEMENT_SUPPORTS_USER_ACTION_STATE) != 0
     }
 
+    /// Whether this pseudo-element is enabled for all content.
+    pub fn enabled_in_content(&self) -> bool {
+        self.flags() & structs::CSS_PSEUDO_ELEMENT_ENABLED_IN_UA_SHEETS_AND_CHROME == 0
+    }
+
+    /// Whether this pseudo is enabled explicitly in UA sheets.
+    pub fn enabled_in_ua_sheets(&self) -> bool {
+        (self.flags() & structs::CSS_PSEUDO_ELEMENT_ENABLED_IN_UA_SHEETS) != 0
+    }
+
+    /// Whether this pseudo is enabled explicitly in chrome sheets.
+    pub fn enabled_in_chrome(&self) -> bool {
+        (self.flags() & structs::CSS_PSEUDO_ELEMENT_ENABLED_IN_CHROME) != 0
+    }
+
     /// Whether this pseudo-element skips flex/grid container display-based
     /// fixup.
     #[inline]
-    pub fn skip_item_based_display_fixup(&self) -> bool {
+    pub fn skip_item_display_fixup(&self) -> bool {
         (self.flags() & structs::CSS_PSEUDO_ELEMENT_IS_FLEX_OR_GRID_ITEM) == 0
     }
 
     /// Whether this pseudo-element is precomputed.
     #[inline]
     pub fn is_precomputed(&self) -> bool {
-        self.is_anon_box()
-    }
-
-    /// Covert non-canonical pseudo-element to canonical one, and keep a
-    /// canonical one as it is.
-    pub fn canonical(&self) -> PseudoElement {
-        match *self {
-            PseudoElement::MozPlaceholder => PseudoElement::Placeholder,
-            _ => self.clone(),
-        }
+        self.is_anon_box() && !self.is_tree_pseudo_element()
     }
 
     /// Property flag that properties must have to apply to this pseudo-element.
     #[inline]
     pub fn property_restriction(&self) -> Option<PropertyFlags> {
-        match *self {
-            PseudoElement::FirstLetter => Some(APPLIES_TO_FIRST_LETTER),
-            PseudoElement::FirstLine => Some(APPLIES_TO_FIRST_LINE),
-            PseudoElement::Placeholder => Some(APPLIES_TO_PLACEHOLDER),
-            _ => None,
-        }
+        Some(match *self {
+            PseudoElement::FirstLetter => PropertyFlags::APPLIES_TO_FIRST_LETTER,
+            PseudoElement::FirstLine => PropertyFlags::APPLIES_TO_FIRST_LINE,
+            PseudoElement::Placeholder => PropertyFlags::APPLIES_TO_PLACEHOLDER,
+            PseudoElement::Cue => PropertyFlags::APPLIES_TO_CUE,
+            PseudoElement::Marker if static_prefs::pref!("layout.css.marker.restricted") => {
+                PropertyFlags::APPLIES_TO_MARKER
+            },
+            _ => return None,
+        })
     }
 
     /// Whether this pseudo-element should actually exist if it has
     /// the given styles.
-    pub fn should_exist(&self, style: &ComputedValues) -> bool
-    {
-        let display = style.get_box().clone_display();
-        if display == display::T::none {
+    pub fn should_exist(&self, style: &ComputedValues) -> bool {
+        debug_assert!(self.is_eager());
+
+        if style.get_box().clone_display() == Display::None {
             return false;
         }
+
         if self.is_before_or_after() && style.ineffective_content_property() {
             return false;
         }

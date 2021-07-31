@@ -1,10 +1,12 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // https://html.spec.whatwg.org/multipage/#htmltablecellelement
-[HTMLConstructor, Abstract]
+[Exposed=Window]
 interface HTMLTableCellElement : HTMLElement {
+  [HTMLConstructor] constructor();
+
   [CEReactions]
            attribute unsigned long colSpan;
   [CEReactions]
@@ -12,6 +14,11 @@ interface HTMLTableCellElement : HTMLElement {
   // [CEReactions]
   //          attribute DOMString headers;
   readonly attribute long cellIndex;
+
+  // [CEReactions]
+  //          attribute DOMString scope; // only conforming for th elements
+  // [CEReactions]
+  //          attribute DOMString abbr;  // only conforming for th elements
 
   // also has obsolete members
 };
@@ -35,6 +42,6 @@ partial interface HTMLTableCellElement {
   // [CEReactions]
   //          attribute DOMString vAlign;
 
-  [CEReactions, TreatNullAs=EmptyString]
-  attribute DOMString bgColor;
+  [CEReactions]
+  attribute [TreatNullAs=EmptyString] DOMString bgColor;
 };

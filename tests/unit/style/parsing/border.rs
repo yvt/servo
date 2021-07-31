@@ -1,43 +1,72 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use parsing::parse;
+use crate::parsing::parse;
 use style::parser::Parse;
-use style::properties::MaybeBoxed;
 use style::properties::longhands::{border_image_outset, border_image_repeat, border_image_slice};
 use style::properties::longhands::{border_image_source, border_image_width};
 use style::properties::shorthands::border_image;
+use style::properties::MaybeBoxed;
 use style::values::specified::BorderRadius;
 use style_traits::ToCss;
 
 macro_rules! assert_longhand {
     ($parsed_shorthand: expr, $prop: ident, $value_string: expr) => {
-        assert_eq!($parsed_shorthand.$prop, parse_longhand!($prop, $value_string).maybe_boxed())
-    }
+        assert_eq!(
+            $parsed_shorthand.$prop,
+            parse_longhand!($prop, $value_string).maybe_boxed()
+        )
+    };
 }
 
 macro_rules! assert_initial {
     ($parsed_shorthand: expr, $prop: ident) => {
-        assert_eq!($parsed_shorthand.$prop, $prop::get_initial_specified_value().maybe_boxed())
-    }
+        assert_eq!(
+            $parsed_shorthand.$prop,
+            $prop::get_initial_specified_value().maybe_boxed()
+        )
+    };
 }
 
 macro_rules! assert_border_radius_values {
     ($input:expr; $tlw:expr, $trw:expr, $brw:expr, $blw:expr ;
                   $tlh:expr, $trh:expr, $brh:expr, $blh:expr) => {
         let input = parse(BorderRadius::parse, $input)
-                          .expect(&format!("Failed parsing {} as border radius",
-                                  $input));
-        assert_eq!(::style_traits::ToCss::to_css_string(&input.top_left.0.width()), $tlw);
-        assert_eq!(::style_traits::ToCss::to_css_string(&input.top_right.0.width()), $trw);
-        assert_eq!(::style_traits::ToCss::to_css_string(&input.bottom_right.0.width()), $brw);
-        assert_eq!(::style_traits::ToCss::to_css_string(&input.bottom_left.0.width()), $blw);
-        assert_eq!(::style_traits::ToCss::to_css_string(&input.top_left.0.height()), $tlh);
-        assert_eq!(::style_traits::ToCss::to_css_string(&input.top_right.0.height()), $trh);
-        assert_eq!(::style_traits::ToCss::to_css_string(&input.bottom_right.0.height()), $brh);
-        assert_eq!(::style_traits::ToCss::to_css_string(&input.bottom_left.0.height()), $blh);
-    }
+            .expect(&format!("Failed parsing {} as border radius", $input));
+        assert_eq!(
+            ::style_traits::ToCss::to_css_string(&input.top_left.0.width()),
+            $tlw
+        );
+        assert_eq!(
+            ::style_traits::ToCss::to_css_string(&input.top_right.0.width()),
+            $trw
+        );
+        assert_eq!(
+            ::style_traits::ToCss::to_css_string(&input.bottom_right.0.width()),
+            $brw
+        );
+        assert_eq!(
+            ::style_traits::ToCss::to_css_string(&input.bottom_left.0.width()),
+            $blw
+        );
+        assert_eq!(
+            ::style_traits::ToCss::to_css_string(&input.top_left.0.height()),
+            $tlh
+        );
+        assert_eq!(
+            ::style_traits::ToCss::to_css_string(&input.top_right.0.height()),
+            $trh
+        );
+        assert_eq!(
+            ::style_traits::ToCss::to_css_string(&input.bottom_right.0.height()),
+            $brh
+        );
+        assert_eq!(
+            ::style_traits::ToCss::to_css_string(&input.bottom_left.0.height()),
+            $blh
+        );
+    };
 }
 
 #[test]
@@ -168,16 +197,16 @@ fn border_image_outset_should_return_length_on_length_zero() {
 fn test_border_style() {
     use style::values::specified::BorderStyle;
 
-    assert_roundtrip_with_context!(BorderStyle::parse, r#"none"#);
-    assert_roundtrip_with_context!(BorderStyle::parse, r#"hidden"#);
-    assert_roundtrip_with_context!(BorderStyle::parse, r#"solid"#);
-    assert_roundtrip_with_context!(BorderStyle::parse, r#"double"#);
-    assert_roundtrip_with_context!(BorderStyle::parse, r#"dotted"#);
-    assert_roundtrip_with_context!(BorderStyle::parse, r#"dashed"#);
-    assert_roundtrip_with_context!(BorderStyle::parse, r#"groove"#);
-    assert_roundtrip_with_context!(BorderStyle::parse, r#"ridge"#);
-    assert_roundtrip_with_context!(BorderStyle::parse, r#"inset"#);
-    assert_roundtrip_with_context!(BorderStyle::parse, r#"outset"#);
+    assert_roundtrip_with_context!(<BorderStyle as Parse>::parse, r#"none"#);
+    assert_roundtrip_with_context!(<BorderStyle as Parse>::parse, r#"hidden"#);
+    assert_roundtrip_with_context!(<BorderStyle as Parse>::parse, r#"solid"#);
+    assert_roundtrip_with_context!(<BorderStyle as Parse>::parse, r#"double"#);
+    assert_roundtrip_with_context!(<BorderStyle as Parse>::parse, r#"dotted"#);
+    assert_roundtrip_with_context!(<BorderStyle as Parse>::parse, r#"dashed"#);
+    assert_roundtrip_with_context!(<BorderStyle as Parse>::parse, r#"groove"#);
+    assert_roundtrip_with_context!(<BorderStyle as Parse>::parse, r#"ridge"#);
+    assert_roundtrip_with_context!(<BorderStyle as Parse>::parse, r#"inset"#);
+    assert_roundtrip_with_context!(<BorderStyle as Parse>::parse, r#"outset"#);
 }
 
 #[test]

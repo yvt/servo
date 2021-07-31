@@ -1,14 +1,14 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! Gecko's restyle damage computation (aka change hints, aka `nsChangeHint`).
 
-use gecko_bindings::bindings;
-use gecko_bindings::structs;
-use gecko_bindings::structs::nsChangeHint;
-use matching::{StyleChange, StyleDifference};
-use properties::ComputedValues;
+use crate::gecko_bindings::bindings;
+use crate::gecko_bindings::structs;
+use crate::gecko_bindings::structs::nsChangeHint;
+use crate::matching::{StyleChange, StyleDifference};
+use crate::properties::ComputedValues;
 use std::ops::{BitAnd, BitOr, BitOrAssign, Not};
 
 /// The representation of Gecko's restyle damage is just a wrapper over
@@ -51,18 +51,28 @@ impl GeckoRestyleDamage {
         let mut reset_only = false;
         let hint = unsafe {
             bindings::Gecko_CalcStyleDifference(
-                old_style,
-                new_style,
+                old_style.as_gecko_computed_style(),
+                new_style.as_gecko_computed_style(),
                 &mut any_style_changed,
                 &mut reset_only,
             )
         };
+        if reset_only && !old_style.custom_properties_equal(new_style) {
+            // The Gecko_CalcStyleDifference call only checks the non-custom
+            // property structs, so we check the custom properties here. Since
+            // they generate no damage themselves, we can skip this check if we
+            // already know we had some inherited (regular) property
+            // differences.
+            any_style_changed = true;
+            reset_only = false;
+        }
         let change = if any_style_changed {
             StyleChange::Changed { reset_only }
         } else {
             StyleChange::Unchanged
         };
-        StyleDifference::new(GeckoRestyleDamage(nsChangeHint(hint)), change)
+        let damage = GeckoRestyleDamage(nsChangeHint(hint));
+        StyleDifference { damage, change }
     }
 
     /// Returns true if this restyle damage contains all the damage of |other|.
@@ -73,7 +83,7 @@ impl GeckoRestyleDamage {
     /// Gets restyle damage to reconstruct the entire frame, subsuming all
     /// other damage.
     pub fn reconstruct() -> Self {
-        GeckoRestyleDamage(structs::nsChangeHint_nsChangeHint_ReconstructFrame)
+        GeckoRestyleDamage(structs::nsChangeHint::nsChangeHint_ReconstructFrame)
     }
 }
 

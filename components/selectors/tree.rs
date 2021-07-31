@@ -1,25 +1,30 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! Traits that nodes must implement. Breaks the otherwise-cyclic dependency
 //! between layout and style.
 
-use attr::{AttrSelectorOperation, NamespaceConstraint, CaseSensitivity};
-use matching::{ElementSelectorFlags, LocalMatchingContext, MatchingContext, RelevantLinkStatus};
-use parser::SelectorImpl;
-use servo_arc::NonZeroPtrMut;
+use crate::attr::{AttrSelectorOperation, CaseSensitivity, NamespaceConstraint};
+use crate::matching::{ElementSelectorFlags, MatchingContext};
+use crate::parser::SelectorImpl;
 use std::fmt::Debug;
+use std::ptr::NonNull;
 
-/// Opaque representation of an Element, for identity comparisons. We use
-/// NonZeroPtrMut to get the NonZero optimization.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct OpaqueElement(pub NonZeroPtrMut<()>);
+/// Opaque representation of an Element, for identity comparisons.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct OpaqueElement(NonNull<()>);
+
+unsafe impl Send for OpaqueElement {}
 
 impl OpaqueElement {
     /// Creates a new OpaqueElement from an arbitrarily-typed pointer.
-    pub fn new<T>(ptr: *const T) -> Self {
-        OpaqueElement(NonZeroPtrMut::new(ptr as *const () as *mut ()))
+    pub fn new<T>(ptr: &T) -> Self {
+        unsafe {
+            OpaqueElement(NonNull::new_unchecked(
+                ptr as *const T as *const () as *mut (),
+            ))
+        }
     }
 }
 
@@ -31,19 +36,23 @@ pub trait Element: Sized + Clone + Debug {
 
     fn parent_element(&self) -> Option<Self>;
 
+    /// Whether the parent node of this element is a shadow root.
+    fn parent_node_is_shadow_root(&self) -> bool;
+
+    /// The host of the containing shadow root, if any.
+    fn containing_shadow_host(&self) -> Option<Self>;
+
     /// The parent of a given pseudo-element, after matching a pseudo-element
     /// selector.
     ///
     /// This is guaranteed to be called in a pseudo-element.
     fn pseudo_element_originating_element(&self) -> Option<Self> {
+        debug_assert!(self.is_pseudo_element());
         self.parent_element()
     }
 
-    /// Skips non-element nodes
-    fn first_child_element(&self) -> Option<Self>;
-
-    /// Skips non-element nodes
-    fn last_child_element(&self) -> Option<Self>;
+    /// Whether we're matching on a pseudo-element.
+    fn is_pseudo_element(&self) -> bool;
 
     /// Skips non-element nodes
     fn prev_sibling_element(&self) -> Option<Self>;
@@ -53,41 +62,69 @@ pub trait Element: Sized + Clone + Debug {
 
     fn is_html_element_in_html_document(&self) -> bool;
 
-    fn get_local_name(&self) -> &<Self::Impl as SelectorImpl>::BorrowedLocalName;
+    fn has_local_name(&self, local_name: &<Self::Impl as SelectorImpl>::BorrowedLocalName) -> bool;
 
     /// Empty string for no namespace
-    fn get_namespace(&self) -> &<Self::Impl as SelectorImpl>::BorrowedNamespaceUrl;
+    fn has_namespace(&self, ns: &<Self::Impl as SelectorImpl>::BorrowedNamespaceUrl) -> bool;
 
-    fn attr_matches(&self,
-                    ns: &NamespaceConstraint<&<Self::Impl as SelectorImpl>::NamespaceUrl>,
-                    local_name: &<Self::Impl as SelectorImpl>::LocalName,
-                    operation: &AttrSelectorOperation<&<Self::Impl as SelectorImpl>::AttrValue>)
-                    -> bool;
+    /// Whether this element and the `other` element have the same local name and namespace.
+    fn is_same_type(&self, other: &Self) -> bool;
 
-    fn match_non_ts_pseudo_class<F>(&self,
-                                    pc: &<Self::Impl as SelectorImpl>::NonTSPseudoClass,
-                                    context: &mut LocalMatchingContext<Self::Impl>,
-                                    relevant_link: &RelevantLinkStatus,
-                                    flags_setter: &mut F) -> bool
-        where F: FnMut(&Self, ElementSelectorFlags);
+    fn attr_matches(
+        &self,
+        ns: &NamespaceConstraint<&<Self::Impl as SelectorImpl>::NamespaceUrl>,
+        local_name: &<Self::Impl as SelectorImpl>::LocalName,
+        operation: &AttrSelectorOperation<&<Self::Impl as SelectorImpl>::AttrValue>,
+    ) -> bool;
 
-    fn match_pseudo_element(&self,
-                            pe: &<Self::Impl as SelectorImpl>::PseudoElement,
-                            context: &mut MatchingContext)
-                            -> bool;
+    fn match_non_ts_pseudo_class<F>(
+        &self,
+        pc: &<Self::Impl as SelectorImpl>::NonTSPseudoClass,
+        context: &mut MatchingContext<Self::Impl>,
+        flags_setter: &mut F,
+    ) -> bool
+    where
+        F: FnMut(&Self, ElementSelectorFlags);
+
+    fn match_pseudo_element(
+        &self,
+        pe: &<Self::Impl as SelectorImpl>::PseudoElement,
+        context: &mut MatchingContext<Self::Impl>,
+    ) -> bool;
 
     /// Whether this element is a `link`.
     fn is_link(&self) -> bool;
 
-    fn has_id(&self,
-              id: &<Self::Impl as SelectorImpl>::Identifier,
-              case_sensitivity: CaseSensitivity)
-              -> bool;
+    /// Returns whether the element is an HTML <slot> element.
+    fn is_html_slot_element(&self) -> bool;
 
-    fn has_class(&self,
-                 name: &<Self::Impl as SelectorImpl>::ClassName,
-                 case_sensitivity: CaseSensitivity)
-                 -> bool;
+    /// Returns the assigned <slot> element this element is assigned to.
+    ///
+    /// Necessary for the `::slotted` pseudo-class.
+    fn assigned_slot(&self) -> Option<Self> {
+        None
+    }
+
+    fn has_id(
+        &self,
+        id: &<Self::Impl as SelectorImpl>::Identifier,
+        case_sensitivity: CaseSensitivity,
+    ) -> bool;
+
+    fn has_class(
+        &self,
+        name: &<Self::Impl as SelectorImpl>::Identifier,
+        case_sensitivity: CaseSensitivity,
+    ) -> bool;
+
+    /// Returns the mapping from the `exportparts` attribute in the reverse
+    /// direction, that is, in an outer-tree -> inner-tree direction.
+    fn imported_part(
+        &self,
+        name: &<Self::Impl as SelectorImpl>::Identifier,
+    ) -> Option<<Self::Impl as SelectorImpl>::Identifier>;
+
+    fn is_part(&self, name: &<Self::Impl as SelectorImpl>::Identifier) -> bool;
 
     /// Returns whether this element matches `:empty`.
     ///
@@ -105,13 +142,6 @@ pub trait Element: Sized + Clone + Debug {
     /// Returns whether this element should ignore matching nth child
     /// selector.
     fn ignores_nth_child_selectors(&self) -> bool {
-        false
-    }
-
-    /// Return true if we want to stop lookup ancestor of the current
-    /// element while matching complex selectors with descendant/child
-    /// combinator.
-    fn blocks_ancestor_combinators(&self) -> bool {
         false
     }
 }

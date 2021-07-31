@@ -1,84 +1,40 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! Communication with the compositor thread.
 
-use SendableFrameTree;
-use compositor::CompositingReason;
-use euclid::{Point2D, Size2D};
+use crate::compositor::CompositingReason;
+use crate::{ConstellationMsg, SendableFrameTree};
+use canvas::canvas_paint_thread::ImageUpdate;
+use crossbeam_channel::{Receiver, Sender};
+use embedder_traits::EventLoopWaker;
+use euclid::Rect;
 use gfx_traits::Epoch;
 use ipc_channel::ipc::IpcSender;
-use msg::constellation_msg::{Key, KeyModifiers, KeyState, PipelineId, TopLevelBrowsingContextId};
+use msg::constellation_msg::{PipelineId, TopLevelBrowsingContextId};
 use net_traits::image::base::Image;
 use profile_traits::mem;
 use profile_traits::time;
-use script_traits::{AnimationState, ConstellationMsg, EventResult, LoadData};
-use servo_url::ServoUrl;
+use script_traits::{AnimationState, EventResult, MouseButton, MouseEventType};
 use std::fmt::{Debug, Error, Formatter};
-use std::sync::mpsc::{Receiver, Sender};
-use style_traits::cursor::Cursor;
+use std::rc::Rc;
 use style_traits::viewport::ViewportConstraints;
-use webrender;
+use style_traits::CSSPixel;
 use webrender_api;
-
-
-/// Used to wake up the event loop, provided by the servo port/embedder.
-pub trait EventLoopWaker : 'static + Send {
-    fn clone(&self) -> Box<EventLoopWaker + Send>;
-    fn wake(&self);
-}
-
-/// Sends messages to the embedder.
-pub struct EmbedderProxy {
-    pub sender: Sender<EmbedderMsg>,
-    pub event_loop_waker: Box<EventLoopWaker>,
-}
-
-impl EmbedderProxy {
-    pub fn send(&self, msg: EmbedderMsg) {
-        // Send a message and kick the OS event loop awake.
-        if let Err(err) = self.sender.send(msg) {
-            warn!("Failed to send response ({}).", err);
-        }
-        self.event_loop_waker.wake();
-    }
-}
-
-impl Clone for EmbedderProxy {
-    fn clone(&self) -> EmbedderProxy {
-        EmbedderProxy {
-            sender: self.sender.clone(),
-            event_loop_waker: self.event_loop_waker.clone(),
-        }
-    }
-}
-
-/// The port that the embedder receives messages on.
-pub struct EmbedderReceiver {
-    pub receiver: Receiver<EmbedderMsg>
-}
-
-impl EmbedderReceiver {
-    pub fn try_recv_embedder_msg(&mut self) -> Option<EmbedderMsg> {
-        self.receiver.try_recv().ok()
-    }
-    pub fn recv_embedder_msg(&mut self) -> EmbedderMsg {
-        self.receiver.recv().unwrap()
-    }
-}
+use webrender_api::units::{DeviceIntPoint, DeviceIntSize};
+use webrender_surfman::WebrenderSurfman;
 
 /// Sends messages to the compositor.
 pub struct CompositorProxy {
     pub sender: Sender<Msg>,
-    pub event_loop_waker: Box<EventLoopWaker>,
+    pub event_loop_waker: Box<dyn EventLoopWaker>,
 }
 
 impl CompositorProxy {
     pub fn send(&self, msg: Msg) {
-        // Send a message and kick the OS event loop awake.
         if let Err(err) = self.sender.send(msg) {
-            warn!("Failed to send response ({}).", err);
+            warn!("Failed to send response ({:?}).", err);
         }
         self.event_loop_waker.wake();
     }
@@ -95,7 +51,7 @@ impl Clone for CompositorProxy {
 
 /// The port that the compositor receives messages on.
 pub struct CompositorReceiver {
-    pub receiver: Receiver<Msg>
+    pub receiver: Receiver<Msg>,
 }
 
 impl CompositorReceiver {
@@ -107,59 +63,18 @@ impl CompositorReceiver {
     }
 }
 
-pub trait RenderListener {
-    fn recomposite(&mut self, reason: CompositingReason);
-}
-
-impl RenderListener for CompositorProxy {
-    fn recomposite(&mut self, reason: CompositingReason) {
+impl CompositorProxy {
+    pub fn recomposite(&self, reason: CompositingReason) {
         self.send(Msg::Recomposite(reason));
     }
 }
 
-pub enum EmbedderMsg {
-    /// A status message to be displayed by the browser chrome.
-    Status(TopLevelBrowsingContextId, Option<String>),
-    /// Alerts the embedder that the current page has changed its title.
-    ChangePageTitle(TopLevelBrowsingContextId, Option<String>),
-    /// Move the window to a point
-    MoveTo(TopLevelBrowsingContextId, Point2D<i32>),
-    /// Resize the window to size
-    ResizeTo(TopLevelBrowsingContextId, Size2D<u32>),
-    /// Get Window Informations size and position
-    GetClientWindow(TopLevelBrowsingContextId, IpcSender<(Size2D<u32>, Point2D<i32>)>),
-    /// Wether or not to follow a link
-    AllowNavigation(TopLevelBrowsingContextId, ServoUrl, IpcSender<bool>),
-    /// Sends an unconsumed key event back to the embedder.
-    KeyEvent(Option<TopLevelBrowsingContextId>, Option<char>, Key, KeyState, KeyModifiers),
-    /// Changes the cursor.
-    SetCursor(Cursor),
-    /// A favicon was detected
-    NewFavicon(TopLevelBrowsingContextId, ServoUrl),
-    /// <head> tag finished parsing
-    HeadParsed(TopLevelBrowsingContextId),
-    /// The history state has changed.
-    HistoryChanged(TopLevelBrowsingContextId, Vec<LoadData>, usize),
-    /// Enter or exit fullscreen
-    SetFullscreenState(TopLevelBrowsingContextId, bool),
-    /// The load of a page has begun
-    LoadStart(TopLevelBrowsingContextId),
-    /// The load of a page has completed
-    LoadComplete(TopLevelBrowsingContextId),
-}
-
 /// Messages from the painting thread and the constellation thread to the compositor thread.
 pub enum Msg {
-    /// Requests that the compositor shut down.
-    Exit,
-
     /// Informs the compositor that the constellation has completed shutdown.
     /// Required because the constellation can have pending calls to make
     /// (e.g. SetFrameTree) at the time that we send it an ExitMsg.
     ShutdownComplete,
-
-    /// Scroll a page in a window
-    ScrollFragmentPoint(webrender_api::ClipId, Point2D<f32>, bool),
     /// Alerts the compositor that the given pipeline has changed whether it is running animations.
     ChangeRunningAnimationsState(PipelineId, AnimationState),
     /// Replaces the current frame tree, typically called during main frame navigation.
@@ -169,7 +84,7 @@ pub enum Msg {
     /// Script has handled a touch event, and either prevented or allowed default actions.
     TouchEventProcessed(EventResult),
     /// Composite to a PNG file and return the Image over a passed channel.
-    CreatePng(IpcSender<Option<Image>>),
+    CreatePng(Option<Rect<f32, CSSPixel>>, IpcSender<Option<Image>>),
     /// Alerts the compositor that the viewport has been constrained in some manner
     ViewportConstrained(PipelineId, ViewportConstraints),
     /// A reply to the compositor asking if the output image is stable.
@@ -188,22 +103,57 @@ pub enum Msg {
     /// Runs a closure in the compositor thread.
     /// It's used to dispatch functions from webrender to the main thread's event loop.
     /// Required to allow WGL GLContext sharing in Windows.
-    Dispatch(Box<Fn() + Send>),
+    Dispatch(Box<dyn Fn() + Send>),
     /// Indicates to the compositor that it needs to record the time when the frame with
     /// the given ID (epoch) is painted and report it to the layout thread of the given
     /// pipeline ID.
     PendingPaintMetric(PipelineId, Epoch),
     /// The load of a page has completed
     LoadComplete(TopLevelBrowsingContextId),
+    /// WebDriver mouse button event
+    WebDriverMouseButtonEvent(MouseEventType, MouseButton, f32, f32),
+    /// WebDriver mouse move event
+    WebDriverMouseMoveEvent(f32, f32),
+
+    /// Get Window Informations size and position.
+    GetClientWindow(IpcSender<(DeviceIntSize, DeviceIntPoint)>),
+    /// Get screen size.
+    GetScreenSize(IpcSender<DeviceIntSize>),
+    /// Get screen available size.
+    GetScreenAvailSize(IpcSender<DeviceIntSize>),
+
+    /// Webrender operations requested from non-compositor threads.
+    Webrender(WebrenderMsg),
+}
+
+pub enum WebrenderFontMsg {
+    AddFontInstance(
+        webrender_api::FontKey,
+        f32,
+        Sender<webrender_api::FontInstanceKey>,
+    ),
+    AddFont(gfx_traits::FontData, Sender<webrender_api::FontKey>),
+}
+
+pub enum WebrenderCanvasMsg {
+    GenerateKey(Sender<webrender_api::ImageKey>),
+    UpdateImages(Vec<ImageUpdate>),
+}
+
+pub enum WebrenderMsg {
+    Layout(script_traits::WebrenderMsg),
+    Net(net_traits::WebrenderImageMsg),
+    Font(WebrenderFontMsg),
+    Canvas(WebrenderCanvasMsg),
 }
 
 impl Debug for Msg {
     fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
         match *self {
-            Msg::Exit => write!(f, "Exit"),
             Msg::ShutdownComplete => write!(f, "ShutdownComplete"),
-            Msg::ScrollFragmentPoint(..) => write!(f, "ScrollFragmentPoint"),
-            Msg::ChangeRunningAnimationsState(..) => write!(f, "ChangeRunningAnimationsState"),
+            Msg::ChangeRunningAnimationsState(_, state) => {
+                write!(f, "ChangeRunningAnimationsState({:?})", state)
+            },
             Msg::SetFrameTree(..) => write!(f, "SetFrameTree"),
             Msg::Recomposite(..) => write!(f, "Recomposite"),
             Msg::TouchEventProcessed(..) => write!(f, "TouchEventProcessed"),
@@ -216,27 +166,12 @@ impl Debug for Msg {
             Msg::Dispatch(..) => write!(f, "Dispatch"),
             Msg::PendingPaintMetric(..) => write!(f, "PendingPaintMetric"),
             Msg::LoadComplete(..) => write!(f, "LoadComplete"),
-        }
-    }
-}
-
-impl Debug for EmbedderMsg {
-    fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
-        match *self {
-            EmbedderMsg::Status(..) => write!(f, "Status"),
-            EmbedderMsg::ChangePageTitle(..) => write!(f, "ChangePageTitle"),
-            EmbedderMsg::MoveTo(..) => write!(f, "MoveTo"),
-            EmbedderMsg::ResizeTo(..) => write!(f, "ResizeTo"),
-            EmbedderMsg::GetClientWindow(..) => write!(f, "GetClientWindow"),
-            EmbedderMsg::AllowNavigation(..) => write!(f, "AllowNavigation"),
-            EmbedderMsg::KeyEvent(..) => write!(f, "KeyEvent"),
-            EmbedderMsg::SetCursor(..) => write!(f, "SetCursor"),
-            EmbedderMsg::NewFavicon(..) => write!(f, "NewFavicon"),
-            EmbedderMsg::HeadParsed(..) => write!(f, "HeadParsed"),
-            EmbedderMsg::HistoryChanged(..) => write!(f, "HistoryChanged"),
-            EmbedderMsg::SetFullscreenState(..) => write!(f, "SetFullscreenState"),
-            EmbedderMsg::LoadStart(..) => write!(f, "LoadStart"),
-            EmbedderMsg::LoadComplete(..) => write!(f, "LoadComplete"),
+            Msg::WebDriverMouseButtonEvent(..) => write!(f, "WebDriverMouseButtonEvent"),
+            Msg::WebDriverMouseMoveEvent(..) => write!(f, "WebDriverMouseMoveEvent"),
+            Msg::GetClientWindow(..) => write!(f, "GetClientWindow"),
+            Msg::GetScreenSize(..) => write!(f, "GetScreenSize"),
+            Msg::GetScreenAvailSize(..) => write!(f, "GetScreenAvailSize"),
+            Msg::Webrender(..) => write!(f, "Webrender"),
         }
     }
 }
@@ -257,4 +192,7 @@ pub struct InitialCompositorState {
     pub webrender: webrender::Renderer,
     pub webrender_document: webrender_api::DocumentId,
     pub webrender_api: webrender_api::RenderApi,
+    pub webrender_surfman: WebrenderSurfman,
+    pub webrender_gl: Rc<dyn gleam::gl::Gl>,
+    pub webxr_main_thread: webxr::MainThreadRegistry,
 }

@@ -1,14 +1,18 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // https://html.spec.whatwg.org/multipage/#htmlscriptelement
-[HTMLConstructor]
+[Exposed=Window]
 interface HTMLScriptElement : HTMLElement {
+  [HTMLConstructor] constructor();
+
   [CEReactions]
-           attribute DOMString src;
+           attribute USVString src;
   [CEReactions]
            attribute DOMString type;
+  [CEReactions]
+           attribute boolean noModule;
   [CEReactions]
            attribute DOMString charset;
   [CEReactions]
@@ -21,6 +25,8 @@ interface HTMLScriptElement : HTMLElement {
            attribute DOMString text;
   [CEReactions]
            attribute DOMString integrity;
+  [CEReactions]
+           attribute DOMString referrerPolicy;
 
   // also has obsolete members
 };

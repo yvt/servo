@@ -1,21 +1,37 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! Generic types for CSS values related to backgrounds.
 
+use crate::values::generics::length::{GenericLengthPercentageOrAuto, LengthPercentageOrAuto};
+
 /// A generic value for the `background-size` property.
-#[cfg_attr(feature = "gecko", derive(MallocSizeOf))]
-#[cfg_attr(feature = "servo", derive(HeapSizeOf))]
-#[derive(Animate, Clone, ComputeSquaredDistance, Copy, Debug)]
-#[derive(PartialEq, ToComputedValue, ToCss)]
-pub enum BackgroundSize<LengthOrPercentageOrAuto> {
+#[derive(
+    Animate,
+    Clone,
+    ComputeSquaredDistance,
+    Copy,
+    Debug,
+    MallocSizeOf,
+    PartialEq,
+    SpecifiedValueInfo,
+    ToAnimatedValue,
+    ToAnimatedZero,
+    ToComputedValue,
+    ToCss,
+    ToResolvedValue,
+    ToShmem,
+)]
+#[repr(C, u8)]
+pub enum GenericBackgroundSize<LengthPercent> {
     /// `<width> <height>`
-    Explicit {
+    ExplicitSize {
         /// Explicit width.
-        width: LengthOrPercentageOrAuto,
+        width: GenericLengthPercentageOrAuto<LengthPercent>,
         /// Explicit height.
-        height: LengthOrPercentageOrAuto
+        #[css(skip_if = "GenericLengthPercentageOrAuto::is_auto")]
+        height: GenericLengthPercentageOrAuto<LengthPercent>,
     },
     /// `cover`
     #[animation(error)]
@@ -23,4 +39,16 @@ pub enum BackgroundSize<LengthOrPercentageOrAuto> {
     /// `contain`
     #[animation(error)]
     Contain,
+}
+
+pub use self::GenericBackgroundSize as BackgroundSize;
+
+impl<LengthPercentage> BackgroundSize<LengthPercentage> {
+    /// Returns `auto auto`.
+    pub fn auto() -> Self {
+        GenericBackgroundSize::ExplicitSize {
+            width: LengthPercentageOrAuto::Auto,
+            height: LengthPercentageOrAuto::Auto,
+        }
+    }
 }

@@ -1,25 +1,26 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // XXX The spec says that the performance timeline task source should be
 //     a low priority task and it should be processed during idle periods.
 //     We are currently treating this task queue as a normal priority queue.
 
-use dom::bindings::refcounted::Trusted;
-use dom::globalscope::GlobalScope;
-use script_runtime::{CommonScriptMsg, ScriptChan, ScriptThreadEventCategory};
+use crate::dom::bindings::refcounted::Trusted;
+use crate::dom::globalscope::GlobalScope;
+use crate::script_runtime::{CommonScriptMsg, ScriptChan, ScriptThreadEventCategory};
+use crate::task::{TaskCanceller, TaskOnce};
+use crate::task_source::{TaskSource, TaskSourceName};
+use msg::constellation_msg::PipelineId;
 use std::fmt;
 use std::result::Result;
-use task::{TaskCanceller, TaskOnce};
-use task_source::TaskSource;
 
 #[derive(JSTraceable)]
-pub struct PerformanceTimelineTaskSource(pub Box<ScriptChan + Send + 'static>);
+pub struct PerformanceTimelineTaskSource(pub Box<dyn ScriptChan + Send + 'static>, pub PipelineId);
 
 impl Clone for PerformanceTimelineTaskSource {
     fn clone(&self) -> PerformanceTimelineTaskSource {
-        PerformanceTimelineTaskSource(self.0.clone())
+        PerformanceTimelineTaskSource(self.0.clone(), self.1.clone())
     }
 }
 
@@ -30,17 +31,17 @@ impl fmt::Debug for PerformanceTimelineTaskSource {
 }
 
 impl TaskSource for PerformanceTimelineTaskSource {
-    fn queue_with_canceller<T>(
-        &self,
-        task: T,
-        canceller: &TaskCanceller,
-    ) -> Result<(), ()>
+    const NAME: TaskSourceName = TaskSourceName::PerformanceTimeline;
+
+    fn queue_with_canceller<T>(&self, task: T, canceller: &TaskCanceller) -> Result<(), ()>
     where
         T: TaskOnce + 'static,
     {
         let msg = CommonScriptMsg::Task(
             ScriptThreadEventCategory::PerformanceTimelineTask,
-            box canceller.wrap_task(task)
+            Box::new(canceller.wrap_task(task)),
+            Some(self.1),
+            PerformanceTimelineTaskSource::NAME,
         );
         self.0.send(msg).map_err(|_| ())
     }

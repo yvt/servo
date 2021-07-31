@@ -1,6 +1,6 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 /*
  * The origin of this IDL file is:
  * https://dom.spec.whatwg.org/#interface-document
@@ -8,8 +8,9 @@
  */
 
 // https://dom.spec.whatwg.org/#interface-document
-[Constructor]
+[Exposed=Window]
 interface Document : Node {
+  [Throws] constructor();
   [SameObject]
   readonly attribute DOMImplementation implementation;
   [Constant]
@@ -33,13 +34,16 @@ interface Document : Node {
   HTMLCollection getElementsByClassName(DOMString classNames);
 
   [CEReactions, NewObject, Throws]
-  Element createElement(DOMString localName, optional ElementCreationOptions options);
+  Element createElement(DOMString localName, optional (DOMString or ElementCreationOptions) options = {});
   [CEReactions, NewObject, Throws]
-  Element createElementNS(DOMString? namespace, DOMString qualifiedName, optional ElementCreationOptions options);
+  Element createElementNS(DOMString? namespace, DOMString qualifiedName,
+                          optional (DOMString or ElementCreationOptions) options = {});
   [NewObject]
   DocumentFragment createDocumentFragment();
   [NewObject]
   Text createTextNode(DOMString data);
+  [NewObject, Throws]
+  CDATASection createCDATASection(DOMString data);
   [NewObject]
   Comment createComment(DOMString data);
   [NewObject, Throws]
@@ -70,8 +74,8 @@ interface Document : Node {
                               optional NodeFilter? filter = null);
 };
 
-Document implements NonElementParentNode;
-Document implements ParentNode;
+Document includes NonElementParentNode;
+Document includes ParentNode;
 
 enum DocumentReadyState { "loading", "interactive", "complete" };
 
@@ -83,7 +87,7 @@ dictionary ElementCreationOptions {
 // [OverrideBuiltins]
 partial /*sealed*/ interface Document {
   // resource metadata management
-  [/*PutForwards=href, */Unforgeable]
+  [PutForwards=href, Unforgeable]
   readonly attribute Location? location;
   [SetterThrows] attribute DOMString domain;
   readonly attribute DOMString referrer;
@@ -118,8 +122,9 @@ partial /*sealed*/ interface Document {
 
   // dynamic markup insertion
   [CEReactions, Throws]
-  Document open(optional DOMString type = "text/html", optional DOMString replace = "");
-  // WindowProxy open(DOMString url, DOMString name, DOMString features, optional boolean replace = false);
+  Document open(optional DOMString unused1, optional DOMString unused2);
+  [CEReactions, Throws]
+  WindowProxy? open(USVString url, DOMString name, DOMString features);
   [CEReactions, Throws]
   void close();
   [CEReactions, Throws]
@@ -129,7 +134,6 @@ partial /*sealed*/ interface Document {
 
   // user interaction
   readonly attribute Window?/*Proxy?*/ defaultView;
-  readonly attribute Element? activeElement;
   boolean hasFocus();
   // [CEReactions]
   // attribute DOMString designMode;
@@ -138,7 +142,7 @@ partial /*sealed*/ interface Document {
   // boolean queryCommandEnabled(DOMString commandId);
   // boolean queryCommandIndeterm(DOMString commandId);
   // boolean queryCommandState(DOMString commandId);
-  // boolean queryCommandSupported(DOMString commandId);
+  boolean queryCommandSupported(DOMString commandId);
   // DOMString queryCommandValue(DOMString commandId);
 
   // special event handler IDL attributes that only apply to Document objects
@@ -146,13 +150,13 @@ partial /*sealed*/ interface Document {
 
   // also has obsolete members
 };
-Document implements GlobalEventHandlers;
-Document implements DocumentAndElementEventHandlers;
+Document includes GlobalEventHandlers;
+Document includes DocumentAndElementEventHandlers;
 
 // https://html.spec.whatwg.org/multipage/#Document-partial
 partial interface Document {
-  [CEReactions, TreatNullAs=EmptyString]
-  attribute DOMString fgColor;
+  [CEReactions]
+  attribute [TreatNullAs=EmptyString] DOMString fgColor;
 
   // https://github.com/servo/servo/issues/8715
   // [CEReactions, TreatNullAs=EmptyString]
@@ -166,11 +170,12 @@ partial interface Document {
   // [CEReactions, TreatNullAs=EmptyString]
   // attribute DOMString alinkColor;
 
-  [CEReactions, TreatNullAs=EmptyString]
-  attribute DOMString bgColor;
+  [CEReactions]
+  attribute [TreatNullAs=EmptyString] DOMString bgColor;
 
   [SameObject]
   readonly attribute HTMLCollection anchors;
+
   [SameObject]
   readonly attribute HTMLCollection applets;
 
@@ -180,30 +185,6 @@ partial interface Document {
 
   // Tracking issue for document.all: https://github.com/servo/servo/issues/7396
   // readonly attribute HTMLAllCollection all;
-};
-
-// http://w3c.github.io/touch-events/#idl-def-Document
-partial interface Document {
-      Touch createTouch(Window/*Proxy*/ view,
-                        EventTarget target,
-                        long identifier,
-                        double pageX,
-                        double pageY,
-                        double screenX,
-                        double screenY);
-
-      TouchList createTouchList(Touch... touches);
-};
-
-// https://drafts.csswg.org/cssom-view/#dom-document-elementfrompoint
-partial interface Document {
-  Element? elementFromPoint(double x, double y);
-  sequence<Element> elementsFromPoint(double x, double y);
-};
-
-// https://drafts.csswg.org/cssom/#extensions-to-the-document-interface
-partial interface Document {
-  [SameObject] readonly attribute StyleSheetList styleSheets;
 };
 
 // https://fullscreen.spec.whatwg.org/#api
@@ -216,4 +197,18 @@ partial interface Document {
 
   attribute EventHandler onfullscreenchange;
   attribute EventHandler onfullscreenerror;
+};
+
+Document includes DocumentOrShadowRoot;
+
+// https://w3c.github.io/selection-api/#dom-document
+partial interface Document {
+  Selection? getSelection();
+};
+
+
+// Servo internal API.
+partial interface Document {
+  [Throws]
+  ShadowRoot servoGetMediaControls(DOMString id);
 };
