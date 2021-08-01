@@ -458,58 +458,145 @@ impl WindowProxy {
         return val.get();
     }
 
-    // https://html.spec.whatwg.org/multipage/#window-open-steps
+    /// Implements <https://html.spec.whatwg.org/multipage/#window-open-steps>.
     pub fn open(
         &self,
         url: USVString,
         target: DOMString,
         features: DOMString,
     ) -> Fallible<Option<DomRoot<WindowProxy>>> {
-        // Step 4.
+        // TODO: Which concept in spec does `self` correspond to?
+
+        // > 1. If the event loop's termination nesting level is nonzero, return
+        // >    null.
+        //
+        // TODO: Return null if the event loops' termination nesting level is
+        //       nonzero
+
+        // > 2. Let `source browsing context` be the entry global object's
+        // >    browsing context.
+        //
+        // TODO: Get the entry global object
+
+        // > 3. If target is the empty string, then set target to "_blank".
         let non_empty_target = match target.as_ref() {
             "" => DOMString::from("_blank"),
             _ => target,
         };
-        // Step 5
+
+        // > 4. Let `tokenizedFeatures` be the result of tokenizing `features`.
         let tokenized_features = tokenize_open_features(features);
-        // Step 7-9
+
+        // > 5. Let `noopener` and `noreferrer` be false.
+        // >
+        // > 6. If `tokenizedFeatures["noopener"]` exists, then:
+        // >
+        // >     6.1. Set `noopener` to the result of parsing
+        // >          `tokenizedFeatures["noopener"]` as a boolean feature.
+        // >
+        // >     6.2. Remove `tokenizedFeatures["noopener"]`.
+        // >
+        // > 7. If `tokenizedFeatures["noreferrer"]` exists, then:
+        // >
+        // >     7.1. Set `noreferrer` to the result of parsing
+        // >          `tokenizedFeatures["noreferrer"]` as a boolean feature.
+        // >
+        // >     7.2. Remove `tokenizedFeatures["noreferrer"]`.
+        // >
+        // > 8. If `noreferrer` is true, then set `noopener` to true.
+        //
+        // TODO: Remove processed features in step 6.2, 7.2
+        //       <https://github.com/servo/servo/issues/23321>
         let noreferrer = parse_open_feature_boolean(&tokenized_features, "noreferrer");
         let noopener = if noreferrer {
             true
         } else {
             parse_open_feature_boolean(&tokenized_features, "noopener")
         };
-        // Step 10, 11
+
+        // > 9. Let `target browsing context` and windowType be the result of
+        // >    applying the rules for choosing a browsing context given target,
+        // >    `source browsing context`, and noopener.
+        // >
+        // > 10. Let `new` be true if windowType is either "new and unrestricted"
+        // >     or "new with no opener", and false otherwise.
+        //
+        // TODO: `self` for this should be the `source browsing context`, not
+        //       the `self`
         let (chosen, new) = match self.choose_browsing_context(non_empty_target, noopener) {
             (Some(chosen), new) => (chosen, new),
+            // > 11. If target browsing context is null, then return null.
             (None, _) => return Ok(None),
         };
-        // TODO Step 12, set up browsing context features.
+
+        // > 12. If `new` is true, then set up browsing context features for
+        // >     `target browsing context` given tokenizedFeatures.
+        //
+        // TODO: Set up browsing context features
+
         let target_document = match chosen.document() {
             Some(target_document) => target_document,
             None => return Ok(None),
         };
         let target_window = target_document.window();
-        // Step 13, and 14.4, will have happened elsewhere,
-        // since we've created a new browsing context and loaded it with about:blank.
+
+        // > 13. Let `urlRecord` be the URL "about:blank".
+        //
+        // > 14. If `url` is not the empty string or `new` is true, then: [...]
+        //
+        // If `new == true`, step 13 and 14.5 will have happened elsewhere,
+        // since we've created a new browsing context and loaded it with
+        // `about:blank`.
         if !url.is_empty() {
             let existing_document = self
                 .currently_active
                 .get()
                 .and_then(|id| ScriptThread::find_document(id))
                 .unwrap();
-            // Step 14.1
+            // > 14.1. If `url` is not the empty string, then parse `url`
+            // >       relative to the entry settings object, and set
+            // >       `urlRecord` to the resulting URL record, if any. If the
+            // >       parse a URL algorithm failed, then throw a "SyntaxError"
+            //>        `DOMException`.
             let url = match existing_document.url().join(&url) {
                 Ok(url) => url,
                 Err(_) => return Err(Error::Syntax),
             };
-            // Step 14.3
+
+            // > 14.2. Let `request` be a new request whose URL is `urlRecord`.
+            // >
+            // > 14.3. If `noreferrer` is true, then set request's referrer to
+            // >       "noreferrer".
             let referrer = if noreferrer {
                 Referrer::NoReferrer
             } else {
                 target_window.upcast::<GlobalScope>().get_referrer()
             };
-            // Step 14.5
+
+            // > 14.4. Let `window` be target browsing context's active window.
+            // >
+            // > 14.5. If `urlRecord` is "about:blank" and `new` is true, then
+            // >       queue a global task on the networking task source given
+            // >       `window` to fire an event named `load` at `window`, with
+            // >       the legacy target override flag set.
+            //
+            // Handled elsewhere as explained above.
+            //
+            // TOOD: But might not be with the right timing; we should queue a
+            //       networking-task-source task right now
+
+            // > 14.6. Otherwise:
+            // >
+            // > 14.6.1. Let `historyHandling` be "replace" if `new` is true;
+            // >         otherwise "default".
+            //
+            // > 14.6.2. Navigate `target browsing context` to `request`, with
+            // >         `exceptionsEnabled` set to true, `historyHandling` set
+            // >         to `historyHandling`, and the `source browsing context`
+            // >         set to `source browsing context`.
+            //
+            // TODO: Pass `source browsing context`, which will be used to check
+            //       if it's allowed to navigate the target browsing context
             let referrer_policy = target_document.get_referrer_policy();
             let pipeline_id = target_window.upcast::<GlobalScope>().pipeline_id();
             let secure = target_window.upcast::<GlobalScope>().is_secure_context();
@@ -528,11 +615,20 @@ impl WindowProxy {
             };
             target_window.load_url(replacement_flag, false, load_data);
         }
+
+        // > 15. If `noopener` is true or `windowType` is "new with no opener",
+        // >     then return null.
+        // (Dis-owning has been done in create_auxiliary_browsing_context)
         if noopener {
-            // Step 15 (Dis-owning has been done in create_auxiliary_browsing_context).
             return Ok(None);
         }
-        // Step 17.
+
+        // > 16. Otherwise, if `new` is false, set `target browsing context`'s
+        // >     opener browsing context to `source browsing context`.
+        //
+        // TODO: <https://github.com/servo/servo/issues/23040>
+
+        // > 17. Return `target browsing context`'s `WindowProxy` object.
         return Ok(target_document.browsing_context());
     }
 
