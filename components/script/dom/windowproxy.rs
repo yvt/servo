@@ -330,7 +330,7 @@ impl WindowProxy {
             };
             let constellation_msg = ScriptMsg::ScriptNewAuxiliary(load_info, pipeline_sender);
             window.send_to_constellation(constellation_msg);
-            ScriptThread::process_attach_layout(new_layout_info, document.origin().clone());
+            ScriptThread::process_attach_layout(new_layout_info, document.origin().clone(), true);
             let msg = EmbedderMsg::BrowserCreated(new_top_level_browsing_context_id);
             window.send_to_embedder(msg);
             // TODO: if noopener is false, copy the sessionStorage storage area of the creator origin.
