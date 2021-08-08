@@ -74,10 +74,18 @@ impl CookieStorage {
 
             // http://tools.ietf.org/html/rfc6265#section-5.3 step 11.2
             if c.cookie.http_only().unwrap_or(false) && source == CookieSource::NonHTTP {
+                log::trace!(
+                    "Refusing to remove the existing cookie {:?} because \
+                    its http-only-flag is set, and the received cookie was \
+                    received from a non-HTTP API",
+                    c
+                );
+
                 // Undo the removal.
                 cookies.push(c);
                 Err(())
             } else {
+                log::trace!("Removed the existing cookie {:?}", c);
                 Ok(Some(c))
             }
         } else {
@@ -90,18 +98,33 @@ impl CookieStorage {
         for cookie in cookies.iter_mut() {
             cookie.set_expiry_time_negative();
         }
+
+        log::debug!(
+            "Set the expirty times of the {} cookies of domain {domain:?} to negative",
+            cookies.len(),
+            domain = reg_host(url.host_str().unwrap_or("")),
+        );
     }
 
     // http://tools.ietf.org/html/rfc6265#section-5.3
     pub fn push(&mut self, mut cookie: Cookie, url: &ServoUrl, source: CookieSource) {
+        log::debug!(
+            "Handling the received cookie {:?}, url = {:?}, source = {:?}",
+            cookie,
+            url,
+            source
+        );
+
         // https://www.ietf.org/id/draft-ietf-httpbis-cookie-alone-01.txt Step 1
         if cookie.cookie.secure().unwrap_or(false) && !url.is_secure_scheme() {
+            log::trace!("Rejecting the cookie because it's marked as secure, but the URL is not");
             return;
         }
 
         let old_cookie = self.remove(&cookie, url, source);
         if old_cookie.is_err() {
             // This new cookie is not allowed to overwrite an existing one.
+            log::trace!("Rejecting the cookie because the existing one could not be removed");
             return;
         }
 
@@ -116,6 +139,11 @@ impl CookieStorage {
         let cookies = self.cookies_map.entry(domain).or_insert(vec![]);
 
         if cookies.len() == self.max_per_host {
+            log::trace!(
+                "Per-host maximum cookie limit ({}) reached, evicting old ones",
+                self.max_per_host
+            );
+
             let old_len = cookies.len();
             cookies.retain(|c| !is_cookie_expired(&c));
             let new_len = cookies.len();
@@ -124,9 +152,15 @@ impl CookieStorage {
             if new_len == old_len &&
                 !evict_one_cookie(cookie.cookie.secure().unwrap_or(false), cookies)
             {
+                log::trace!("Rejecting the cookie because eviction failed");
                 return;
             }
         }
+
+        log::trace!(
+            "Accepting the received cookie, domain = {domain:?}",
+            domain = reg_host(&cookie.cookie.domain().as_ref().unwrap_or(&""))
+        );
         cookies.push(cookie);
     }
 
@@ -149,7 +183,12 @@ impl CookieStorage {
         let domain = reg_host(url.host_str().unwrap_or(""));
         if let Entry::Occupied(mut entry) = self.cookies_map.entry(domain) {
             let cookies = entry.get_mut();
-            cookies.retain(|c| !is_cookie_expired(&c));
+            cookies.retain(|c| {
+                (!is_cookie_expired(&c)) || {
+                    log::debug!("Removing the expired cookie {:?}", c);
+                    false
+                }
+            });
             if cookies.len() == 0 {
                 entry.remove_entry();
             }
@@ -159,19 +198,17 @@ impl CookieStorage {
     // http://tools.ietf.org/html/rfc6265#section-5.4
     pub fn cookies_for_url(&mut self, url: &ServoUrl, source: CookieSource) -> Option<String> {
         let filterer = |c: &&mut Cookie| -> bool {
-            info!(
-                " === SENT COOKIE : {} {} {:?} {:?}",
-                c.cookie.name(),
-                c.cookie.value(),
-                c.cookie.domain(),
-                c.cookie.path()
-            );
-            info!(
-                " === SENT COOKIE RESULT {}",
-                c.appropriate_for_url(url, source)
-            );
             // Step 1
-            c.appropriate_for_url(url, source)
+            let is_appropriate = c.appropriate_for_url(url, source);
+
+            log::trace!(
+                "Found an {} cookie for URL {:?}: {:?}",
+                ["inappropriate", "appropriate"][is_appropriate as usize],
+                url,
+                c
+            );
+
+            is_appropriate
         };
         // Step 2
         let domain = reg_host(url.host_str().unwrap_or(""));
@@ -194,7 +231,7 @@ impl CookieStorage {
         };
         let result = url_cookies.iter_mut().fold("".to_owned(), reducer);
 
-        info!(" === COOKIES SENT: {}", result);
+        log::debug!("Cookie string to be sent for URL {:?}: {:?}", url, result);
         match result.len() {
             0 => None,
             _ => Some(result),

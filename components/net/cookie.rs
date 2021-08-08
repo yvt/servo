@@ -10,13 +10,14 @@ use net_traits::pub_domains::is_pub_domain;
 use net_traits::CookieSource;
 use servo_url::ServoUrl;
 use std::borrow::ToOwned;
+use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use time::{at, now, Duration, Tm};
 
 /// A stored cookie that wraps the definition in cookie-rs. This is used to implement
 /// various behaviours defined in the spec that rely on an associated request URL,
 /// which cookie-rs and hyper's header parsing do not support.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct Cookie {
     #[serde(
         deserialize_with = "hyper_serde::deserialize",
@@ -36,6 +37,25 @@ pub struct Cookie {
     )]
     pub last_access: Tm,
     pub expiry_time: Option<Serde<Tm>>,
+}
+
+impl fmt::Debug for Cookie {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("Cookie")
+            .field("cookie", &self.cookie.to_string())
+            .field("host_only", &self.host_only)
+            .field("persistent", &self.persistent)
+            .field("creation_time", &self.creation_time.rfc3339().to_string())
+            .field("last_access", &self.last_access.rfc3339().to_string())
+            .field(
+                "expiry_time",
+                &self
+                    .expiry_time
+                    .as_ref()
+                    .map(|tm| tm.0.rfc3339().to_string()),
+            )
+            .finish()
+    }
 }
 
 impl Cookie {
