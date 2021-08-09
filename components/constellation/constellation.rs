@@ -242,6 +242,9 @@ struct Browser {
     /// context.
     focused_browsing_context_id: BrowsingContextId,
 
+    /// The system focus state for this browser.
+    has_system_focus: bool,
+
     /// The joint session history for this browser.
     session_history: JointSessionHistory,
 }
@@ -1648,6 +1651,9 @@ where
             FromCompositorMsg::ChangeBrowserVisibility(top_level_browsing_context_id, visible) => {
                 self.handle_change_browser_visibility(top_level_browsing_context_id, visible);
             },
+            FromCompositorMsg::Focus(top_level_browsing_context_id, new_system_focus_state) => {
+                self.handle_focus(top_level_browsing_context_id, new_system_focus_state);
+            },
         }
     }
 
@@ -3043,6 +3049,7 @@ where
             top_level_browsing_context_id,
             Browser {
                 focused_browsing_context_id: browsing_context_id,
+                has_system_focus: true,
                 session_history: JointSessionHistory::new(),
             },
         );
@@ -3392,6 +3399,7 @@ where
             new_top_level_browsing_context_id,
             Browser {
                 focused_browsing_context_id: new_browsing_context_id,
+                has_system_focus: true,
                 session_history: JointSessionHistory::new(),
             },
         );
@@ -3951,6 +3959,14 @@ where
                 },
             };
 
+        let system_focus_state = match self.browsers.get(&top_level_id) {
+            Some(browser) => browser.has_system_focus,
+            None => {
+                warn!("Browser {} disappeared during traversal", top_level_id);
+                false
+            },
+        };
+
         if let Some(old_pipeline) = self.pipelines.get(&old_pipeline_id) {
             old_pipeline.notify_visibility(false);
         }
@@ -3971,6 +3987,7 @@ where
             }
 
             new_pipeline.notify_visibility(true);
+            new_pipeline.notify_system_focus(system_focus_state);
         }
 
         self.update_activity(old_pipeline_id);
@@ -4558,6 +4575,49 @@ where
             },
             Some(pipeline) => pipeline.notify_visibility(visible),
         };
+    }
+
+    fn handle_focus(
+        &mut self,
+        top_level_browsing_context_id: TopLevelBrowsingContextId,
+        new_system_focus_state: bool,
+    ) {
+        debug!(
+            "Top-level browsing context {} {} a system focus; notifying all of \
+            its active pipelines about that",
+            top_level_browsing_context_id,
+            ["lost", "got"][new_system_focus_state as usize]
+        );
+
+        if let Some(browser) = self.browsers.get_mut(&top_level_browsing_context_id) {
+            browser.has_system_focus = new_system_focus_state;
+        } else {
+            return warn!(
+                "Top-level browsing context {} does not exist",
+                top_level_browsing_context_id
+            );
+        }
+
+        for browsing_context in
+            self.fully_active_browsing_contexts_iter(top_level_browsing_context_id)
+        {
+            let pipeline_id = browsing_context.pipeline_id;
+            trace!(
+                "Sending SystemFocus(_, {:?}) to pipeline {}.",
+                browsing_context.id,
+                pipeline_id
+            );
+
+            let pipeline = match self.pipelines.get(&pipeline_id) {
+                Some(pipeline) => pipeline,
+                None => {
+                    warn!("Pipeline {} is already closed", pipeline_id);
+                    continue;
+                },
+            };
+
+            pipeline.notify_system_focus(new_system_focus_state);
+        }
     }
 
     fn notify_history_changed(&self, top_level_browsing_context_id: TopLevelBrowsingContextId) {
@@ -5488,6 +5548,7 @@ where
             // type system.
             .or_insert_with(|| Browser {
                 focused_browsing_context_id: BrowsingContextId::from(top_level_id),
+                has_system_focus: true,
                 session_history: JointSessionHistory::new(),
             })
             .session_history
