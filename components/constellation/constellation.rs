@@ -1819,8 +1819,8 @@ where
                     data,
                 );
             },
-            FromScriptMsg::Focus => {
-                self.handle_focus_msg(source_pipeline_id);
+            FromScriptMsg::Focus(focused_child_browsing_context_id) => {
+                self.handle_focus_msg(source_pipeline_id, focused_child_browsing_context_id);
             },
             FromScriptMsg::VisibilityChangeComplete(is_visible) => {
                 self.handle_visibility_change_complete(source_pipeline_id, is_visible);
@@ -3967,6 +3967,10 @@ where
             },
         };
 
+        // Is `browsing_context_id`'s `Document` included in the current focus
+        // chain of the top-level browsing context?
+        let is_focused = self.focused_browsing_context_is_descendant_of(browsing_context_id);
+
         if let Some(old_pipeline) = self.pipelines.get(&old_pipeline_id) {
             old_pipeline.notify_visibility(false);
         }
@@ -3988,6 +3992,12 @@ where
 
             new_pipeline.notify_visibility(true);
             new_pipeline.notify_system_focus(system_focus_state);
+            if is_focused {
+                let msg = ConstellationControlMsg::FocusDocument(new_pipeline_id);
+                if let Err(e) = new_pipeline.event_loop.send(msg) {
+                    self.handle_send_error(new_pipeline_id, e);
+                }
+            }
         }
 
         self.update_activity(old_pipeline_id);
@@ -4285,7 +4295,11 @@ where
         }
     }
 
-    fn handle_focus_msg(&mut self, pipeline_id: PipelineId) {
+    fn handle_focus_msg(
+        &mut self,
+        pipeline_id: PipelineId,
+        focused_child_browsing_context_id: Option<BrowsingContextId>,
+    ) {
         let (browsing_context_id, top_level_browsing_context_id) =
             match self.pipelines.get(&pipeline_id) {
                 Some(pipeline) => (
@@ -4295,10 +4309,19 @@ where
                 None => return warn!("Pipeline {:?} focus parent after closure.", pipeline_id),
             };
 
+        // If a container with a non-null nested browsing context is focused,
+        // the nested browsing context's active document becomes the focused
+        // area of the top-level browsing context instead.
+        //
+        // This variable indicates the browsing context that contains the new
+        // focused area of the top-level browsing context.
+        let focused_browsing_context_id =
+            focused_child_browsing_context_id.unwrap_or(browsing_context_id);
+
         // Update the focused browsing context in its browser in `browsers`.
         match self.browsers.get_mut(&top_level_browsing_context_id) {
             Some(browser) => {
-                browser.focused_browsing_context_id = browsing_context_id;
+                browser.focused_browsing_context_id = focused_browsing_context_id;
             },
             None => {
                 return warn!(
@@ -4308,11 +4331,41 @@ where
             },
         };
 
+        if focused_browsing_context_id != browsing_context_id {
+            self.focus_pipeline_document(focused_browsing_context_id);
+        }
+
         // Focus parent iframes recursively
-        self.focus_parent_pipeline(browsing_context_id);
+        // (Don't have to use `focused_browsing_context_id` here - the iframe
+        // in `browsing_context_id` is already focused.)
+        self.focus_container(browsing_context_id);
     }
 
-    fn focus_parent_pipeline(&mut self, browsing_context_id: BrowsingContextId) {
+    /// Focus the active document of the specified browsing context.
+    fn focus_pipeline_document(&mut self, browsing_context_id: BrowsingContextId) {
+        // Focus the child document
+        let pipeline_id = match self.browsing_contexts.get(&browsing_context_id) {
+            Some(ctx) => ctx.pipeline_id,
+            None => {
+                return warn!(
+                    "Browsing context {:?} focus child after closure.",
+                    browsing_context_id
+                );
+            },
+        };
+        let msg = ConstellationControlMsg::FocusDocument(pipeline_id);
+        let result = match self.pipelines.get(&pipeline_id) {
+            Some(pipeline) => pipeline.event_loop.send(msg),
+            None => return warn!("Pipeline {:?} focus child after closure.", pipeline_id),
+        };
+        if let Err(e) = result {
+            self.handle_send_error(pipeline_id, e);
+        }
+    }
+
+    /// Focus the container of the specified browsing context as well as its all
+    /// outer containers.
+    fn focus_container(&mut self, browsing_context_id: BrowsingContextId) {
         let parent_pipeline_id = match self.browsing_contexts.get(&browsing_context_id) {
             Some(ctx) => ctx.parent_pipeline_id,
             None => {
@@ -4345,7 +4398,7 @@ where
         if let Err(e) = result {
             self.handle_send_error(parent_pipeline_id, e);
         }
-        self.focus_parent_pipeline(parent_browsing_context_id);
+        self.focus_container(parent_browsing_context_id);
     }
 
     fn handle_remove_iframe_msg(
