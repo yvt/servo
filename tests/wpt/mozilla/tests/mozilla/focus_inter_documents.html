@@ -11,21 +11,16 @@
   <input id="d0">
   <script>
 
-  // `iframe.focus` is supposed to fire according to the spec (because it's
-  // included in the focus chain when a child element is focused), but doesn't
-  // fire on Firefox, Blink, WebKit, and Edge. This test depends on
-  // `iframe.focus` to wait for the Servo-specific constellation round-trip, so
-  // we use an explicit timeout to prevent the whole test from being timed out
-  // on other browsers.
+  /** Wait for an `event` event to be fired on `element`. Resolves to a boolean
+   * value indicating whether the event was fired within a predetermined period. */
   async function waitForEvent(element, event) {
     let listener;
     try {
-      const firedInTime = await new Promise(resolve => {
+      return await new Promise(resolve => {
         setTimeout(() => resolve(false), 1000);
         listener = () => resolve(true);
         element.addEventListener(event, listener);
       });
-      assert_true(firedInTime, `Event ${event} fires in time on element ${format_value(element)}`);
     } finally {
       if (listener) {
         element.removeEventListener(event, listener);
@@ -50,6 +45,7 @@
   }, "Starting condition");
 
   promise_test(async t => {
+    const d0 = document.getElementById("d0");
     const f1 = document.getElementById("f1");
     f1.contentDocument.body.innerHTML = '<input id=d1>';
     const d1 = f1.contentDocument.getElementById("d1");
@@ -61,10 +57,10 @@
 
     d1.focus();
 
-    await p0;
-    await p1;   // FIXME: doesn't fire on Firefox, Blink, and WebKit
-    await p2;
-    await p3;
+    assert_true(await p0, "`d1.focus` fires in time");
+    await p1;   // FIXME: doesn't fire on Firefox, Blink, Edge, and WebKit
+    assert_true(await p2, "`f1.contentWindow.focus` fires in time");
+    assert_true(await p3, "`d0.blur` fires in time");
 
     assert_equals(document.activeElement, f1, "The top-level document's activeElement is `f1`");
     assert_true(f1.contentDocument.hasFocus(), "f1's contentDocument has focus");
@@ -85,9 +81,9 @@
 
     d2.focus();
 
-    await p0;
-    await p1;    // FIXME: doesn't fire on Firefox, Blink, and WebKit
-    await p2;
+    assert_true(await p0, "`d1.blur` fires in time");
+    await p1;    // FIXME: doesn't fire on Firefox, Blink, Edge, and WebKit
+    assert_true(await p2, "`f1.contentWindow.blur` fires in time");
 
     assert_equals(document.activeElement, f2, "The top-level document's activeElement is `f2`");
     assert_true(f2.contentDocument.hasFocus(), "f2's contentDocument has focus");
@@ -97,6 +93,8 @@
   }, "Focusing an element in a different container also unfocuses the previously focused element and its container");
 
   promise_test(async t => {
+    const d0 = document.getElementById("d0");
+
     const f2 = document.getElementById("f2");
     const d2 = f2.contentDocument.getElementById("d2");
 
@@ -107,10 +105,10 @@
 
     d0.focus();
 
-    await p0;
-    await p1;    // FIXME: doesn't fire on Firefox, Blink, and WebKit
-    await p2;
-    await p3;
+    assert_true(await p0, "`d2.blur` fires in time");
+    await p1;    // FIXME: doesn't fire on Firefox, Blink, Edge, and WebKit
+    assert_true(await p2, "`f2.contentWindow.blur` fires in time");
+    assert_true(await p3, "`d0.focus` fires in time");
 
     assert_equals(document.activeElement, d0, "The top-level document's activeElement is `d0`");
     assert_false(f2.contentDocument.hasFocus(), "f2's contentDocument does not have focus");
