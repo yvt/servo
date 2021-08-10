@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <script src="/resources/testharness.js"></script>
+  <script src="/resources/testharnessreport.js"></script>
+</head>
+<body>
+  <iframe id="f1"></iframe>
+  <iframe id="f2"></iframe>
+  <input id="d0">
+  <script>
+
+  // `iframe.focus` is supposed to fire according to the spec (because it's
+  // included in the focus chain when a child element is focused), but doesn't
+  // fire on Firefox, Blink, WebKit, and Edge. This test depends on
+  // `iframe.focus` to wait for the Servo-specific constellation round-trip, so
+  // we use an explicit timeout to prevent the whole test from being timed out
+  // on other browsers.
+  async function waitForEvent(element, event) {
+    let listener;
+    try {
+      const firedInTime = await new Promise(resolve => {
+        setTimeout(() => resolve(false), 1000);
+        listener = () => resolve(true);
+        element.addEventListener(event, listener);
+      });
+      assert_true(firedInTime, `Event ${event} fires in time on element ${format_value(element)}`);
+    } finally {
+      if (listener) {
+        element.removeEventListener(event, listener);
+      }
+    }
+  }
+
+  promise_test(async t => {
+    await new Promise(r => window.onload = r);
+
+    const d0 = document.getElementById("d0");
+
+    // This test requires the document to have focus as a starting condition.
+    if (!document.hasFocus() || document.activeElement !== d0) {
+      const p = new Promise(r => d0.onfocus = r);
+      d0.focus();
+      await p;
+    }
+
+    assert_true(document.hasFocus(), "Document has focus as starting condition.");
+    assert_equals(document.activeElement, d0, "`d0` has focus as starting condition.");
+  }, "Starting condition");
+
+  promise_test(async t => {
+    const f1 = document.getElementById("f1");
+    f1.contentDocument.body.innerHTML = '<input id=d1>';
+    const d1 = f1.contentDocument.getElementById("d1");
+
+    const p0 = waitForEvent(d1, 'focus');
+    const p1 = waitForEvent(f1, 'focus');
+    const p2 = waitForEvent(f1.contentWindow, 'focus');
+    const p3 = waitForEvent(d0, 'blur');
+
+    d1.focus();
+
+    await p0;
+    await p1;   // FIXME: doesn't fire on Firefox, Blink, and WebKit
+    await p2;
+    await p3;
+
+    assert_equals(document.activeElement, f1, "The top-level document's activeElement is `f1`");
+    assert_true(f1.contentDocument.hasFocus(), "f1's contentDocument has focus");
+    assert_equals(f1.contentDocument.activeElement, d1, "f1's contentDocument's activeElement is `d1`");
+  }, "Focusing an element in a nested browsing context also focuses the container");
+
+  promise_test(async t => {
+    const f1 = document.getElementById("f1");
+    const d1 = f1.contentDocument.getElementById("d1");
+
+    const f2 = document.getElementById("f2");
+    f2.contentDocument.body.innerHTML = '<input id=d2>';
+    const d2 = f2.contentDocument.getElementById("d2");
+
+    const p0 = waitForEvent(d1, 'blur');
+    const p1 = waitForEvent(f1, 'blur');
+    const p2 = waitForEvent(f1.contentWindow, 'blur');
+
+    d2.focus();
+
+    await p0;
+    await p1;    // FIXME: doesn't fire on Firefox, Blink, and WebKit
+    await p2;
+
+    assert_equals(document.activeElement, f2, "The top-level document's activeElement is `f2`");
+    assert_true(f2.contentDocument.hasFocus(), "f2's contentDocument has focus");
+    assert_equals(f2.contentDocument.activeElement, d2, "f2's contentDocument's activeElement is `d2`");
+    assert_false(f1.contentDocument.hasFocus(), "f1's contentDocument does not have focus");
+    assert_equals(f1.contentDocument.activeElement, f1.contentDocument.body, "f1's contentDocument's activeElement is its body");
+  }, "Focusing an element in a different container also unfocuses the previously focused element and its container");
+
+  promise_test(async t => {
+    const f2 = document.getElementById("f2");
+    const d2 = f2.contentDocument.getElementById("d2");
+
+    const p0 = waitForEvent(d2, 'blur');
+    const p1 = waitForEvent(f2, 'blur');
+    const p2 = waitForEvent(f2.contentWindow, 'blur');
+    const p3 = waitForEvent(d0, 'focus');
+
+    d0.focus();
+
+    await p0;
+    await p1;    // FIXME: doesn't fire on Firefox, Blink, and WebKit
+    await p2;
+    await p3;
+
+    assert_equals(document.activeElement, d0, "The top-level document's activeElement is `d0`");
+    assert_false(f2.contentDocument.hasFocus(), "f2's contentDocument does not have focus");
+    assert_equals(f2.contentDocument.activeElement, f2.contentDocument.body, "f2's contentDocument's activeElement is its body");
+  }, "Unfocusing a container also unfocuses any focused elements within");
+  </script>
+</body>
+</html>
