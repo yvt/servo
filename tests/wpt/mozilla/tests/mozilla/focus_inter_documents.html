@@ -114,6 +114,21 @@
     assert_false(f2.contentDocument.hasFocus(), "f2's contentDocument does not have focus");
     assert_equals(f2.contentDocument.activeElement, f2.contentDocument.body, "f2's contentDocument's activeElement is its body");
   }, "Unfocusing a container also unfocuses any focused elements within");
+
+  promise_test(async t => {
+    const f1 = document.getElementById("f1");
+
+    const p0 = waitForEvent(f1, 'focus');
+    const p1 = waitForEvent(f1.contentWindow, 'focus');
+
+    f1.focus();
+
+    await p0;   // FIXME: doesn't fire on Firefox, Blink, Edge, and WebKit
+    assert_true(await p1, "`f1.contentWindow.focus` fires in time");
+
+    assert_equals(document.activeElement, f1, "The top-level document's activeElement is `f1`");
+    assert_true(f1.contentDocument.hasFocus(), "f1's contentDocument has focus");
+  }, "Focusing a container changes the contained document's 'has focus steps' result");
   </script>
 </body>
 </html>
