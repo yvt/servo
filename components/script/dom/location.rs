@@ -39,15 +39,28 @@ impl Location {
     fn navigate(
         &self,
         url: ServoUrl,
-        referrer: Referrer,
         replacement_flag: HistoryEntryReplacement,
         reload_triggered: bool,
     ) {
-        let document = self.window.Document();
-        let referrer_policy = document.get_referrer_policy();
-        let pipeline_id = self.window.upcast::<GlobalScope>().pipeline_id();
+        // > 2. Let `sourceBrowsingContext` be the incumbent global object's
+        // >    browsing context.
+        //
+        // The active document of the source browsing context used for
+        // navigation determines the request's referrer and referrer policy.
+        let source_global = GlobalScope::incumbent().expect("no incumbent global object");
+        let source_document = source_global
+            .downcast::<Window>()
+            .expect("global object is not a Window")
+            .Document();
+
+        let referrer = Referrer::ReferrerUrl(source_document.url());
+        let referrer_policy = source_document.get_referrer_policy();
+
+        let incumbent_navigation_origin = source_document.origin().immutable().clone();
+
+        let pipeline_id = source_global.pipeline_id();
         let load_data = LoadData::new(
-            LoadOrigin::Script(document.origin().immutable().clone()),
+            LoadOrigin::Script(incumbent_navigation_origin),
             url,
             Some(pipeline_id),
             referrer,
@@ -83,8 +96,7 @@ impl Location {
     // https://html.spec.whatwg.org/multipage/#dom-location-reload
     pub fn reload_without_origin_check(&self) {
         let url = self.get_url();
-        let referrer = Referrer::ReferrerUrl(url.clone());
-        self.navigate(url, referrer, HistoryEntryReplacement::Enabled, true);
+        self.navigate(url, HistoryEntryReplacement::Enabled, true);
     }
 
     #[allow(dead_code)]
@@ -110,8 +122,7 @@ impl LocationMethods for Location {
                 Err(_) => return Err(Error::Syntax),
             };
             // Step 4: Location-object navigate to the resulting URL record.
-            let referrer = Referrer::ReferrerUrl(self.get_url());
-            self.navigate(url, referrer, HistoryEntryReplacement::Disabled, false);
+            self.navigate(url, HistoryEntryReplacement::Disabled, false);
         }
         Ok(())
     }
@@ -120,8 +131,7 @@ impl LocationMethods for Location {
     fn Reload(&self) -> ErrorResult {
         self.check_same_origin_domain()?;
         let url = self.get_url();
-        let referrer = Referrer::ReferrerUrl(url.clone());
-        self.navigate(url, referrer, HistoryEntryReplacement::Enabled, true);
+        self.navigate(url, HistoryEntryReplacement::Enabled, true);
         Ok(())
     }
 
@@ -138,8 +148,7 @@ impl LocationMethods for Location {
             };
             // Step 3: Location-object navigate to the resulting URL record with
             // the replacement flag set.
-            let referrer = Referrer::ReferrerUrl(self.get_url());
-            self.navigate(url, referrer, HistoryEntryReplacement::Enabled, false);
+            self.navigate(url, HistoryEntryReplacement::Enabled, false);
         }
         Ok(())
     }
@@ -170,8 +179,7 @@ impl LocationMethods for Location {
                 _ => Some(&value.0),
             });
             // Step 7: Location-object-setter navigate to copyURL.
-            let referrer = Referrer::ReferrerUrl(self.get_url());
-            self.navigate(copy_url, referrer, HistoryEntryReplacement::Disabled, false);
+            self.navigate(copy_url, HistoryEntryReplacement::Disabled, false);
         }
         Ok(())
     }
@@ -198,8 +206,7 @@ impl LocationMethods for Location {
                 // as state override.
                 let _ = copy_url.as_mut_url().set_host(Some(&value.0));
                 // Step 6: Location-object-setter navigate to copyURL.
-                let referrer = Referrer::ReferrerUrl(self.get_url());
-                self.navigate(copy_url, referrer, HistoryEntryReplacement::Disabled, false);
+                self.navigate(copy_url, HistoryEntryReplacement::Disabled, false);
             }
         }
         Ok(())
@@ -233,8 +240,7 @@ impl LocationMethods for Location {
                 // state as state override.
                 let _ = copy_url.as_mut_url().set_host(Some(&value.0));
                 // Step 6: Location-object-setter navigate to copyURL.
-                let referrer = Referrer::ReferrerUrl(self.get_url());
-                self.navigate(copy_url, referrer, HistoryEntryReplacement::Disabled, false);
+                self.navigate(copy_url, HistoryEntryReplacement::Disabled, false);
             }
         }
         Ok(())
@@ -259,8 +265,7 @@ impl LocationMethods for Location {
                 Err(e) => return Err(Error::Type(format!("Couldn't parse URL: {}", e))),
             };
             // Step 3: Location-object-setter navigate to the resulting URL record.
-            let referrer = Referrer::ReferrerUrl(self.get_url());
-            self.navigate(url, referrer, HistoryEntryReplacement::Disabled, false);
+            self.navigate(url, HistoryEntryReplacement::Disabled, false);
         }
         Ok(())
     }
@@ -288,8 +293,7 @@ impl LocationMethods for Location {
                 // start state as state override.
                 copy_url.as_mut_url().set_path(&value.0);
                 // Step 7: Location-object-setter navigate to copyURL.
-                let referrer = Referrer::ReferrerUrl(self.get_url());
-                self.navigate(copy_url, referrer, HistoryEntryReplacement::Disabled, false);
+                self.navigate(copy_url, HistoryEntryReplacement::Disabled, false);
             }
         }
         Ok(())
@@ -323,8 +327,7 @@ impl LocationMethods for Location {
                 // and port state as state override.
                 let _ = url::quirks::set_port(copy_url.as_mut_url(), &value.0);
                 // Step 7: Location-object-setter navigate to copyURL.
-                let referrer = Referrer::ReferrerUrl(self.get_url());
-                self.navigate(copy_url, referrer, HistoryEntryReplacement::Disabled, false);
+                self.navigate(copy_url, HistoryEntryReplacement::Disabled, false);
             }
         }
         Ok(())
@@ -362,8 +365,7 @@ impl LocationMethods for Location {
                 copy_url.scheme().eq_ignore_ascii_case("https")
             {
                 // Step 7: Location-object-setter navigate to copyURL.
-                let referrer = Referrer::ReferrerUrl(self.get_url());
-                self.navigate(copy_url, referrer, HistoryEntryReplacement::Disabled, false);
+                self.navigate(copy_url, HistoryEntryReplacement::Disabled, false);
             }
         }
         Ok(())
@@ -398,8 +400,7 @@ impl LocationMethods for Location {
                 _ => Some(&value.0),
             });
             // Step 6: Location-object-setter navigate to copyURL.
-            let referrer = Referrer::ReferrerUrl(self.get_url());
-            self.navigate(copy_url, referrer, HistoryEntryReplacement::Disabled, false);
+            self.navigate(copy_url, HistoryEntryReplacement::Disabled, false);
         }
         Ok(())
     }
