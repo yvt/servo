@@ -9,6 +9,7 @@ use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::USVString;
+use crate::dom::dissimilaroriginwindow::DissimilarOriginWindow;
 use crate::dom::document::Document;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::urlhelper::UrlHelper;
@@ -16,7 +17,7 @@ use crate::dom::window::Window;
 use dom_struct::dom_struct;
 use net_traits::request::Referrer;
 use script_traits::{HistoryEntryReplacement, LoadData, LoadOrigin};
-use servo_url::{MutableOrigin, ServoUrl};
+use servo_url::ServoUrl;
 
 #[derive(PartialEq)]
 enum NavigationType {
@@ -40,19 +41,32 @@ enum NavigationType {
 #[dom_struct]
 pub struct Location {
     reflector_: Reflector,
-    window: Dom<Window>,
+    /// This `Location`'s relevant global object from script code's point of
+    /// view. `None` if it's cross-site.
+    ///
+    /// If it's `None`, pretend like the relevant `Document` has already been
+    /// discarded.
+    window: Option<Dom<Window>>,
 }
 
 impl Location {
-    fn new_inherited(window: &Window) -> Location {
+    fn new_inherited(window: Option<&Window>) -> Location {
         Location {
             reflector_: Reflector::new(),
-            window: Dom::from_ref(window),
+            window: window.map(Dom::from_ref),
         }
     }
 
     pub fn new(window: &Window) -> DomRoot<Location> {
-        reflect_dom_object(Box::new(Location::new_inherited(window)), window)
+        reflect_dom_object(Box::new(Location::new_inherited(Some(window))), window)
+    }
+
+    /// Construct a `Location` object for a remote document.
+    ///
+    /// This function essentially creates a proxy to a real `Location` object
+    /// living somewhere outside the current script thread.
+    pub fn new_remote(window: &DissimilarOriginWindow) -> DomRoot<Location> {
+        reflect_dom_object(Box::new(Location::new_inherited(None)), window)
     }
 
     /// Navigate the relevant `Document`'s browsing context.
@@ -64,13 +78,19 @@ impl Location {
     ) {
         let incumbent_global;
 
+        let window = if let Some(window) = &self.window {
+            &**window
+        } else {
+            return;
+        };
+
         // The active document of the source browsing context used for
         // navigation determines the request's referrer and referrer policy.
         let source_window = match ty {
             NavigationType::ReloadByScript | NavigationType::ReloadByConstellation => {
                 // > Navigate the browsing context [...] the source browsing context
                 // > set to the browsing context being navigated.
-                &*self.window
+                window
             },
             NavigationType::Normal => {
                 // > 2. Let `sourceBrowsingContext` be the incumbent global object's
@@ -118,8 +138,7 @@ impl Location {
             None, // Top navigation doesn't inherit secure context
         );
         // TODO: rethrow exceptions, set exceptions enabled flag.
-        self.window
-            .load_url(replacement_flag, reload_triggered, load_data);
+        window.load_url(replacement_flag, reload_triggered, load_data);
     }
 
     /// Get if this `Location`'s [relevant `Document`][1] is non-null.
@@ -132,7 +151,9 @@ impl Location {
         // > this `Location` object's relevant global object's browsing
         // > context's active document, if this `Location` object's relevant
         // > global object's browsing context is non-null, and null otherwise.
-        self.window.Document().browsing_context().is_some()
+        self.window
+            .as_ref()
+            .map_or(false, |w| w.Document().browsing_context().is_some())
     }
 
     /// Get this `Location` object's [relevant `Document`][1], or
@@ -158,7 +179,11 @@ impl Location {
         // > this `Location` object's relevant global object's browsing
         // > context's active document, if this `Location` object's relevant
         // > global object's browsing context is non-null, and null otherwise.
-        if let Some(window_proxy) = self.window.Document().browsing_context() {
+        if let Some(window_proxy) = self
+            .window
+            .as_ref()
+            .and_then(|w| w.Document().browsing_context())
+        {
             // `Location`'s many other operations:
             //
             // > If this `Location` object's relevant `Document` is non-null and
@@ -228,23 +253,25 @@ impl Location {
     /// Perform a user-requested reload (the unlabeled paragraph after
     /// [`reload()`][1]).
     ///
+    /// This method mustn't be called for a `Location` object created by
+    /// [`Self::new_remote`].
+    ///
     /// [1]: https://html.spec.whatwg.org/multipage/#dom-location-reload
     pub fn reload_without_origin_check(&self) {
         // > When a user requests that the active document of a browsing context
         // > be reloaded through a user interface element, the user agent should
         // > navigate the browsing context to the same resource as that
         // > `Document`, with `historyHandling` set to "reload".
-        let url = self.window.get_url();
+        let url = self
+            .window
+            .as_ref()
+            .expect("this operation is invalid for a `Location` proxy")
+            .get_url();
         self.navigate(
             url,
             HistoryEntryReplacement::Enabled,
             NavigationType::ReloadByConstellation,
         );
-    }
-
-    #[allow(dead_code)]
-    pub fn origin(&self) -> &MutableOrigin {
-        self.window.origin()
     }
 }
 

@@ -10,8 +10,8 @@ use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::str::USVString;
 use crate::dom::bindings::structuredclone;
 use crate::dom::bindings::trace::RootedTraceableBox;
-use crate::dom::dissimilaroriginlocation::DissimilarOriginLocation;
 use crate::dom::globalscope::GlobalScope;
+use crate::dom::location::Location;
 use crate::dom::windowproxy::WindowProxy;
 use crate::script_runtime::JSContext;
 use dom_struct::dom_struct;
@@ -40,7 +40,7 @@ pub struct DissimilarOriginWindow {
     window_proxy: Dom<WindowProxy>,
 
     /// The location of this window, initialized lazily.
-    location: MutNullableDom<DissimilarOriginLocation>,
+    location: MutNullableDom<Location>,
 }
 
 impl DissimilarOriginWindow {
@@ -187,9 +187,8 @@ impl DissimilarOriginWindowMethods for DissimilarOriginWindow {
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-location
-    fn Location(&self) -> DomRoot<DissimilarOriginLocation> {
-        self.location
-            .or_init(|| DissimilarOriginLocation::new(self))
+    fn Location(&self) -> DomRoot<Location> {
+        self.location.or_init(|| Location::new_remote(self))
     }
 }
 

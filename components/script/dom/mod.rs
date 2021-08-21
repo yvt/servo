@@ -276,7 +276,6 @@ pub mod cssviewportrule;
 pub mod customelementregistry;
 pub mod customevent;
 pub mod dedicatedworkerglobalscope;
-pub mod dissimilaroriginlocation;
 pub mod dissimilaroriginwindow;
 pub mod document;
 pub mod documentfragment;

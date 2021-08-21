@@ -21,7 +21,7 @@ interface DissimilarOriginWindow : GlobalScope {
   [Unforgeable] readonly attribute WindowProxy? top;
   [Replaceable] readonly attribute WindowProxy frames;
   [Replaceable] readonly attribute unsigned long length;
-  [Unforgeable] readonly attribute DissimilarOriginLocation location;
+  [Unforgeable] readonly attribute Location location;
 
   void close();
   readonly attribute boolean closed;
