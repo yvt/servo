@@ -178,7 +178,7 @@ impl LocationMethods for Location {
                 _ if value.0.starts_with('#') => Some(&value.0[1..]),
                 _ => Some(&value.0),
             });
-            // Step 7: Location-object-setter navigate to copyURL.
+            // Step 7: Location-object navigate to copyURL.
             self.navigate(copy_url, HistoryEntryReplacement::Disabled, false);
         }
         Ok(())
@@ -205,7 +205,7 @@ impl LocationMethods for Location {
                 // Step 5: Basic URL parse the given value, with copyURL as url and host state
                 // as state override.
                 let _ = copy_url.as_mut_url().set_host(Some(&value.0));
-                // Step 6: Location-object-setter navigate to copyURL.
+                // Step 6: Location-object navigate to copyURL.
                 self.navigate(copy_url, HistoryEntryReplacement::Disabled, false);
             }
         }
@@ -239,7 +239,7 @@ impl LocationMethods for Location {
                 // Step 5: Basic URL parse the given value, with copyURL as url and hostname
                 // state as state override.
                 let _ = copy_url.as_mut_url().set_host(Some(&value.0));
-                // Step 6: Location-object-setter navigate to copyURL.
+                // Step 6: Location-object navigate to copyURL.
                 self.navigate(copy_url, HistoryEntryReplacement::Disabled, false);
             }
         }
@@ -264,7 +264,7 @@ impl LocationMethods for Location {
                 Ok(url) => url,
                 Err(e) => return Err(Error::Type(format!("Couldn't parse URL: {}", e))),
             };
-            // Step 3: Location-object-setter navigate to the resulting URL record.
+            // Step 3: Location-object navigate to the resulting URL record.
             self.navigate(url, HistoryEntryReplacement::Disabled, false);
         }
         Ok(())
@@ -292,7 +292,7 @@ impl LocationMethods for Location {
                 // Step 6: Basic URL parse the given value, with copyURL as url and path
                 // start state as state override.
                 copy_url.as_mut_url().set_path(&value.0);
-                // Step 7: Location-object-setter navigate to copyURL.
+                // Step 7: Location-object navigate to copyURL.
                 self.navigate(copy_url, HistoryEntryReplacement::Disabled, false);
             }
         }
@@ -326,7 +326,7 @@ impl LocationMethods for Location {
                 // Step 6: Otherwise, basic URL parse the given value, with copyURL as url
                 // and port state as state override.
                 let _ = url::quirks::set_port(copy_url.as_mut_url(), &value.0);
-                // Step 7: Location-object-setter navigate to copyURL.
+                // Step 7: Location-object navigate to copyURL.
                 self.navigate(copy_url, HistoryEntryReplacement::Disabled, false);
             }
         }
@@ -364,7 +364,7 @@ impl LocationMethods for Location {
             if copy_url.scheme().eq_ignore_ascii_case("http") ||
                 copy_url.scheme().eq_ignore_ascii_case("https")
             {
-                // Step 7: Location-object-setter navigate to copyURL.
+                // Step 7: Location-object navigate to copyURL.
                 self.navigate(copy_url, HistoryEntryReplacement::Disabled, false);
             }
         }
@@ -399,7 +399,7 @@ impl LocationMethods for Location {
                 _ if value.0.starts_with('?') => Some(&value.0[1..]),
                 _ => Some(&value.0),
             });
-            // Step 6: Location-object-setter navigate to copyURL.
+            // Step 6: Location-object navigate to copyURL.
             self.navigate(copy_url, HistoryEntryReplacement::Disabled, false);
         }
         Ok(())
