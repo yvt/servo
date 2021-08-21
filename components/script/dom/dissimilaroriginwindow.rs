@@ -20,7 +20,7 @@ use js::jsval::{JSVal, UndefinedValue};
 use js::rust::{CustomAutoRooter, CustomAutoRooterGuard, HandleValue};
 use msg::constellation_msg::PipelineId;
 use script_traits::{ScriptMsg, StructuredSerializedData};
-use servo_url::ServoUrl;
+use servo_url::{ImmutableOrigin, MutableOrigin, ServoUrl};
 
 /// Represents a dissimilar-origin `Window` that exists in another script thread.
 ///
@@ -47,6 +47,11 @@ impl DissimilarOriginWindow {
     #[allow(unsafe_code)]
     pub fn new(global_to_clone_from: &GlobalScope, window_proxy: &WindowProxy) -> DomRoot<Self> {
         let cx = global_to_clone_from.get_cx();
+
+        // Make this permanently cross-origin to any script code running on
+        // this script thread
+        let origin = MutableOrigin::new(ImmutableOrigin::new_opaque());
+
         let win = Box::new(Self {
             globalscope: GlobalScope::new_inherited(
                 PipelineId::new(),
@@ -56,7 +61,7 @@ impl DissimilarOriginWindow {
                 global_to_clone_from.script_to_constellation_chan().clone(),
                 global_to_clone_from.scheduler_chan().clone(),
                 global_to_clone_from.resource_threads().clone(),
-                global_to_clone_from.origin().clone(),
+                origin,
                 global_to_clone_from.creation_url().clone(),
                 // FIXME(nox): The microtask queue is probably not important
                 // here, but this whole DOM interface is a hack anyway.
