@@ -18,6 +18,25 @@ use net_traits::request::Referrer;
 use script_traits::{HistoryEntryReplacement, LoadData, LoadOrigin};
 use servo_url::{MutableOrigin, ServoUrl};
 
+#[derive(PartialEq)]
+enum NavigationType {
+    /// The "[`Location`-object navigate][1]" steps.
+    ///
+    /// [1]: https://html.spec.whatwg.org/multipage/#location-object-navigate
+    Normal,
+
+    /// The last step of [`reload()`][1] (`reload_triggered == true`)
+    ///
+    /// [1]: https://html.spec.whatwg.org/multipage/#dom-location-reload
+    ReloadByScript,
+
+    /// User-requested navigation (the unlabeled paragraph after
+    /// [`reload()`][1]).
+    ///
+    /// [1]: https://html.spec.whatwg.org/multipage/#dom-location-reload
+    ReloadByConstellation,
+}
+
 #[dom_struct]
 pub struct Location {
     reflector_: Reflector,
@@ -36,34 +55,64 @@ impl Location {
         reflect_dom_object(Box::new(Location::new_inherited(window)), window)
     }
 
-    /// https://html.spec.whatwg.org/multipage/#location-object-navigate
+    /// Navigate the relevant `Document`'s browsing context.
     fn navigate(
         &self,
         url: ServoUrl,
         replacement_flag: HistoryEntryReplacement,
-        reload_triggered: bool,
+        ty: NavigationType,
     ) {
-        // > 2. Let `sourceBrowsingContext` be the incumbent global object's
-        // >    browsing context.
-        //
+        let incumbent_global;
+
         // The active document of the source browsing context used for
         // navigation determines the request's referrer and referrer policy.
-        let source_global = GlobalScope::incumbent().expect("no incumbent global object");
-        let source_document = source_global
-            .downcast::<Window>()
-            .expect("global object is not a Window")
-            .Document();
+        let source_window = match ty {
+            NavigationType::ReloadByScript | NavigationType::ReloadByConstellation => {
+                // > Navigate the browsing context [...] the source browsing context
+                // > set to the browsing context being navigated.
+                &*self.window
+            },
+            NavigationType::Normal => {
+                // > 2. Let `sourceBrowsingContext` be the incumbent global object's
+                // >    browsing context.
+                incumbent_global = GlobalScope::incumbent().expect("no incumbent global object");
+                incumbent_global
+                    .downcast::<Window>()
+                    .expect("global object is not a Window")
+            },
+        };
+        let source_document = source_window.Document();
 
         let referrer = Referrer::ReferrerUrl(source_document.url());
         let referrer_policy = source_document.get_referrer_policy();
 
-        let incumbent_navigation_origin = source_document.origin().immutable().clone();
+        // <https://html.spec.whatwg.org/multipage/#navigate>
+        // > Let `incumbentNavigationOrigin` be the origin of the incumbent
+        // > settings object, or if no script was involved, [...]
+        let (load_origin, creator_pipeline_id) = match ty {
+            NavigationType::Normal | NavigationType::ReloadByScript => {
+                let incumbent_global =
+                    GlobalScope::incumbent().expect("no incumbent global object");
+                let incumbent_window = incumbent_global
+                    .downcast::<Window>()
+                    .expect("global object is not a Window");
+                (
+                    LoadOrigin::Script(incumbent_window.origin().immutable().clone()),
+                    Some(incumbent_window.pipeline_id()),
+                )
+            },
+            NavigationType::ReloadByConstellation => (LoadOrigin::Constellation, None),
+        };
 
-        let pipeline_id = source_global.pipeline_id();
+        let reload_triggered = match ty {
+            NavigationType::ReloadByScript | NavigationType::ReloadByConstellation => true,
+            NavigationType::Normal => false,
+        };
+
         let load_data = LoadData::new(
-            LoadOrigin::Script(incumbent_navigation_origin),
+            load_origin,
             url,
-            Some(pipeline_id),
+            creator_pipeline_id,
             referrer,
             referrer_policy,
             None, // Top navigation doesn't inherit secure context
@@ -166,20 +215,31 @@ impl Location {
             if let Some(copy_url) = f(document.url())? {
                 // Step 5: Terminate these steps if copyURL is null.
                 // Step 6: Location-object navigate to copyURL.
-                self.navigate(copy_url, HistoryEntryReplacement::Disabled, false);
+                self.navigate(
+                    copy_url,
+                    HistoryEntryReplacement::Disabled,
+                    NavigationType::Normal,
+                );
             }
         }
         Ok(())
     }
 
-    // https://html.spec.whatwg.org/multipage/#dom-location-reload
+    /// Perform a user-requested reload (the unlabeled paragraph after
+    /// [`reload()`][1]).
+    ///
+    /// [1]: https://html.spec.whatwg.org/multipage/#dom-location-reload
     pub fn reload_without_origin_check(&self) {
         // > When a user requests that the active document of a browsing context
         // > be reloaded through a user interface element, the user agent should
         // > navigate the browsing context to the same resource as that
         // > `Document`, with `historyHandling` set to "reload".
         let url = self.window.get_url();
-        self.navigate(url, HistoryEntryReplacement::Enabled, true);
+        self.navigate(
+            url,
+            HistoryEntryReplacement::Enabled,
+            NavigationType::ReloadByConstellation,
+        );
     }
 
     #[allow(dead_code)]
@@ -207,7 +267,11 @@ impl LocationMethods for Location {
     // https://html.spec.whatwg.org/multipage/#dom-location-reload
     fn Reload(&self) -> ErrorResult {
         let url = self.get_url_if_same_origin()?;
-        self.navigate(url, HistoryEntryReplacement::Enabled, true);
+        self.navigate(
+            url,
+            HistoryEntryReplacement::Enabled,
+            NavigationType::ReloadByScript,
+        );
         Ok(())
     }
 
@@ -224,7 +288,11 @@ impl LocationMethods for Location {
             };
             // Step 3: Location-object navigate to the resulting URL record with
             // the replacement flag set.
-            self.navigate(url, HistoryEntryReplacement::Enabled, false);
+            self.navigate(
+                url,
+                HistoryEntryReplacement::Enabled,
+                NavigationType::Normal,
+            );
         }
         Ok(())
     }
@@ -316,7 +384,11 @@ impl LocationMethods for Location {
                 Err(e) => return Err(Error::Type(format!("Couldn't parse URL: {}", e))),
             };
             // Step 3: Location-object navigate to the resulting URL record.
-            self.navigate(url, HistoryEntryReplacement::Disabled, false);
+            self.navigate(
+                url,
+                HistoryEntryReplacement::Disabled,
+                NavigationType::Normal,
+            );
         }
         Ok(())
     }
