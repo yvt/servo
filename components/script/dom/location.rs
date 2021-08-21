@@ -73,6 +73,19 @@ impl Location {
             .load_url(replacement_flag, reload_triggered, load_data);
     }
 
+    /// Get if this `Location`'s [relevant `Document`][1] is non-null.
+    ///
+    /// [1]: https://html.spec.whatwg.org/multipage/#relevant-document
+    fn has_document(&self) -> bool {
+        // <https://html.spec.whatwg.org/multipage/#relevant-document>
+        //
+        // > A `Location` object has an associated relevant `Document`, which is
+        // > this `Location` object's relevant global object's browsing
+        // > context's active document, if this `Location` object's relevant
+        // > global object's browsing context is non-null, and null otherwise.
+        self.window.Document().browsing_context().is_some()
+    }
+
     /// Get this `Location` object's [relevant `Document`][1], or
     /// `Err(Error::Security)` if it's non-null and its origin is not same
     /// origin-domain with the entry setting object's origin.
@@ -90,10 +103,33 @@ impl Location {
     ///
     /// [1]: https://html.spec.whatwg.org/multipage/#relevant-document
     fn document_if_same_origin(&self) -> Fallible<Option<DomRoot<Document>>> {
-        if self.window.has_document() {
-            self.check_same_origin_domain()?;
-            Ok(Some(self.window.Document()))
+        // <https://html.spec.whatwg.org/multipage/#relevant-document>
+        //
+        // > A `Location` object has an associated relevant `Document`, which is
+        // > this `Location` object's relevant global object's browsing
+        // > context's active document, if this `Location` object's relevant
+        // > global object's browsing context is non-null, and null otherwise.
+        if let Some(window_proxy) = self.window.Document().browsing_context() {
+            // `Location`'s many other operations:
+            //
+            // > If this `Location` object's relevant `Document` is non-null and
+            // > its origin is not same origin-domain with the entry settings
+            // > object's origin, then throw a "SecurityError" `DOMException`.
+            //
+            // FIXME: We should still return the active document if it's same
+            //        origin but not fully active. `WindowProxy::document`
+            //        currently returns `None` in this case.
+            if let Some(document) = window_proxy.document().filter(|document| {
+                self.entry_settings_object()
+                    .origin()
+                    .same_origin_domain(document.origin())
+            }) {
+                Ok(Some(document))
+            } else {
+                Err(Error::Security)
+            }
         } else {
+            // The browsing context is null
             Ok(None)
         }
     }
@@ -111,19 +147,6 @@ impl Location {
         } else {
             ServoUrl::parse("about:blank").unwrap()
         })
-    }
-
-    fn check_same_origin_domain(&self) -> ErrorResult {
-        let this_document = self.window.Document();
-        if self
-            .entry_settings_object()
-            .origin()
-            .same_origin_domain(this_document.origin())
-        {
-            Ok(())
-        } else {
-            Err(Error::Security)
-        }
     }
 
     fn entry_settings_object(&self) -> DomRoot<GlobalScope> {
@@ -191,7 +214,7 @@ impl LocationMethods for Location {
     // https://html.spec.whatwg.org/multipage/#dom-location-replace
     fn Replace(&self, url: USVString) -> ErrorResult {
         // Step 1: If this Location object's relevant Document is null, then return.
-        if self.window.has_document() {
+        if self.has_document() {
             // Step 2: Parse url relative to the entry settings object. If that failed,
             // throw a "SyntaxError" DOMException.
             let base_url = self.entry_settings_object().api_base_url();
@@ -283,7 +306,7 @@ impl LocationMethods for Location {
     // https://html.spec.whatwg.org/multipage/#dom-location-href
     fn SetHref(&self, value: USVString) -> ErrorResult {
         // Step 1: If this Location object's relevant Document is null, then return.
-        if self.window.has_document() {
+        if self.has_document() {
             // Note: no call to self.check_same_origin_domain()
             // Step 2: Parse the given value relative to the entry settings object.
             // If that failed, throw a TypeError exception.
