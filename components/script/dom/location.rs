@@ -9,6 +9,7 @@ use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::{reflect_dom_object, Reflector};
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::USVString;
+use crate::dom::document::Document;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::urlhelper::UrlHelper;
 use crate::dom::window::Window;
@@ -72,8 +73,44 @@ impl Location {
             .load_url(replacement_flag, reload_triggered, load_data);
     }
 
-    fn get_url(&self) -> ServoUrl {
-        self.window.get_url()
+    /// Get this `Location` object's [relevant `Document`][1], or
+    /// `Err(Error::Security)` if it's non-null and its origin is not same
+    /// origin-domain with the entry setting object's origin.
+    ///
+    /// In the specification's terms:
+    ///
+    ///  1. If this `Location` object's relevant `Document` is null, then return
+    ///     null.
+    ///
+    ///  2. If this `Location` object's relevant `Document`'s origin is not same
+    ///     origin-domain with the entry settings object's origin, then throw a
+    ///     "`SecurityError`" `DOMException`.
+    ///
+    ///  3. Return this `Location` object's relevant `Document`.
+    ///
+    /// [1]: https://html.spec.whatwg.org/multipage/#relevant-document
+    fn document_if_same_origin(&self) -> Fallible<Option<DomRoot<Document>>> {
+        if self.window.has_document() {
+            self.check_same_origin_domain()?;
+            Ok(Some(self.window.Document()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get this `Location` object's [relevant url][1] or
+    /// `Err(Error::Security)` if the [relevant `Document`][2] if it's non-null
+    /// and its origin is not same origin-domain with the entry setting object's
+    /// origin.
+    ///
+    /// [1]: https://html.spec.whatwg.org/multipage/#concept-location-url
+    /// [2]: https://html.spec.whatwg.org/multipage/#relevant-document
+    fn get_url_if_same_origin(&self) -> Fallible<ServoUrl> {
+        Ok(if let Some(document) = self.document_if_same_origin()? {
+            document.url()
+        } else {
+            ServoUrl::parse("about:blank").unwrap()
+        })
     }
 
     fn check_same_origin_domain(&self) -> ErrorResult {
@@ -97,15 +134,13 @@ impl Location {
     #[inline]
     fn setter_common(&self, f: impl FnOnce(ServoUrl) -> Fallible<Option<ServoUrl>>) -> ErrorResult {
         // Step 1: If this Location object's relevant Document is null, then return.
-        if self.window.has_document() {
-            // Step 2: If this Location object's relevant Document's origin is not
-            // same origin-domain with the entry settings object's origin, then
-            // throw a "SecurityError" DOMException.
-            self.check_same_origin_domain()?;
-
+        // Step 2: If this Location object's relevant Document's origin is not
+        // same origin-domain with the entry settings object's origin, then
+        // throw a "SecurityError" DOMException.
+        if let Some(document) = self.document_if_same_origin()? {
             // Step 3: Let copyURL be a copy of this Location object's url.
             // Step 4: Assign the result of running f(copyURL) to copyURL.
-            if let Some(copy_url) = f(self.get_url())? {
+            if let Some(copy_url) = f(document.url())? {
                 // Step 5: Terminate these steps if copyURL is null.
                 // Step 6: Location-object navigate to copyURL.
                 self.navigate(copy_url, HistoryEntryReplacement::Disabled, false);
@@ -116,7 +151,11 @@ impl Location {
 
     // https://html.spec.whatwg.org/multipage/#dom-location-reload
     pub fn reload_without_origin_check(&self) {
-        let url = self.get_url();
+        // > When a user requests that the active document of a browsing context
+        // > be reloaded through a user interface element, the user agent should
+        // > navigate the browsing context to the same resource as that
+        // > `Document`, with `historyHandling` set to "reload".
+        let url = self.window.get_url();
         self.navigate(url, HistoryEntryReplacement::Enabled, true);
     }
 
@@ -144,8 +183,7 @@ impl LocationMethods for Location {
 
     // https://html.spec.whatwg.org/multipage/#dom-location-reload
     fn Reload(&self) -> ErrorResult {
-        self.check_same_origin_domain()?;
-        let url = self.get_url();
+        let url = self.get_url_if_same_origin()?;
         self.navigate(url, HistoryEntryReplacement::Enabled, true);
         Ok(())
     }
@@ -170,8 +208,7 @@ impl LocationMethods for Location {
 
     // https://html.spec.whatwg.org/multipage/#dom-location-hash
     fn GetHash(&self) -> Fallible<USVString> {
-        self.check_same_origin_domain()?;
-        Ok(UrlHelper::Hash(&self.get_url()))
+        Ok(UrlHelper::Hash(&self.get_url_if_same_origin()?))
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-location-hash
@@ -193,8 +230,7 @@ impl LocationMethods for Location {
 
     // https://html.spec.whatwg.org/multipage/#dom-location-host
     fn GetHost(&self) -> Fallible<USVString> {
-        self.check_same_origin_domain()?;
-        Ok(UrlHelper::Host(&self.get_url()))
+        Ok(UrlHelper::Host(&self.get_url_if_same_origin()?))
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-location-host
@@ -215,14 +251,12 @@ impl LocationMethods for Location {
 
     // https://html.spec.whatwg.org/multipage/#dom-location-origin
     fn GetOrigin(&self) -> Fallible<USVString> {
-        self.check_same_origin_domain()?;
-        Ok(UrlHelper::Origin(&self.get_url()))
+        Ok(UrlHelper::Origin(&self.get_url_if_same_origin()?))
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-location-hostname
     fn GetHostname(&self) -> Fallible<USVString> {
-        self.check_same_origin_domain()?;
-        Ok(UrlHelper::Hostname(&self.get_url()))
+        Ok(UrlHelper::Hostname(&self.get_url_if_same_origin()?))
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-location-hostname
@@ -243,8 +277,7 @@ impl LocationMethods for Location {
 
     // https://html.spec.whatwg.org/multipage/#dom-location-href
     fn GetHref(&self) -> Fallible<USVString> {
-        self.check_same_origin_domain()?;
-        Ok(UrlHelper::Href(&self.get_url()))
+        Ok(UrlHelper::Href(&self.get_url_if_same_origin()?))
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-location-href
@@ -267,8 +300,7 @@ impl LocationMethods for Location {
 
     // https://html.spec.whatwg.org/multipage/#dom-location-pathname
     fn GetPathname(&self) -> Fallible<USVString> {
-        self.check_same_origin_domain()?;
-        Ok(UrlHelper::Pathname(&self.get_url()))
+        Ok(UrlHelper::Pathname(&self.get_url_if_same_origin()?))
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-location-pathname
@@ -290,8 +322,7 @@ impl LocationMethods for Location {
 
     // https://html.spec.whatwg.org/multipage/#dom-location-port
     fn GetPort(&self) -> Fallible<USVString> {
-        self.check_same_origin_domain()?;
-        Ok(UrlHelper::Port(&self.get_url()))
+        Ok(UrlHelper::Port(&self.get_url_if_same_origin()?))
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-location-port
@@ -318,8 +349,7 @@ impl LocationMethods for Location {
 
     // https://html.spec.whatwg.org/multipage/#dom-location-protocol
     fn GetProtocol(&self) -> Fallible<USVString> {
-        self.check_same_origin_domain()?;
-        Ok(UrlHelper::Protocol(&self.get_url()))
+        Ok(UrlHelper::Protocol(&self.get_url_if_same_origin()?))
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-location-protocol
@@ -351,8 +381,7 @@ impl LocationMethods for Location {
 
     // https://html.spec.whatwg.org/multipage/#dom-location-search
     fn GetSearch(&self) -> Fallible<USVString> {
-        self.check_same_origin_domain()?;
-        Ok(UrlHelper::Search(&self.get_url()))
+        Ok(UrlHelper::Search(&self.get_url_if_same_origin()?))
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-location-search
