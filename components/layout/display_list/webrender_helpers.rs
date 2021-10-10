@@ -299,7 +299,14 @@ impl DisplayItem {
                         state.clip_ids[item.node_index.to_index()] = Some(id);
                     },
                     ClipScrollNodeType::ScrollFrame(scroll_sensitivity, external_id) => {
-                        let space_clip_info = builder.define_scroll_frame(
+                        let space_and_clip_info = SpaceAndClipInfo {
+                            clip_id: parent_clip_id,
+                            spatial_id: parent_spatial_id,
+                        };
+
+                        let clip_id = builder.define_clip_rect(&space_and_clip_info, item_rect);
+
+                        let spatial_id = builder.define_scroll_frame(
                             parent_spatial_id,
                             external_id,
                             node.content_rect,
@@ -308,9 +315,8 @@ impl DisplayItem {
                             webrender_api::units::LayoutVector2D::zero(),
                         );
 
-                        // TODO(bryce): Figure out what to do here
-                        //  state.clip_ids[item.node_index.to_index()] = Some(space_clip_info.clip_id);
-                        state.spatial_ids[item.node_index.to_index()] = Some(space_clip_info);
+                        state.clip_ids[item.node_index.to_index()] = Some(clip_id);
+                        state.spatial_ids[item.node_index.to_index()] = Some(spatial_id);
                     },
                     ClipScrollNodeType::StickyFrame(ref sticky_data) => {
                         // TODO: Add define_sticky_frame_with_parent to WebRender.
