@@ -811,9 +811,8 @@ impl<Window: WindowMethods + ?Sized> IOCompositor<Window> {
     }
 
     fn send_window_size(&mut self, size_type: WindowSizeType) {
-        // TODO(bryce): Do the hidpi factor correctly as mentioned elsewhere
-        //  let dppx = self.page_zoom * self.embedder_coordinates.hidpi_factor;
-        let dppx: Scale<f32, CSSPixel, DevicePixel> = self.page_zoom * Scale::identity();
+        let dppx: Scale<f32, CSSPixel, DevicePixel> =
+            self.page_zoom * self.embedder_coordinates.hidpi_factor;
 
         let mut txn = render_api::Transaction::new();
         txn.set_document_view(self.embedder_coordinates.get_flipped_viewport());
