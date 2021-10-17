@@ -12,7 +12,7 @@ use crate::display_list::items::{DisplayItem, DisplayList, StackingContextType};
 use euclid::Scale;
 use msg::constellation_msg::PipelineId;
 use style_traits::{CSSPixel, DevicePixel};
-use webrender_api::units::{LayoutPoint, LayoutTransform};
+use webrender_api::units::{LayoutPoint, LayoutRect, LayoutTransform};
 use webrender_api::{
     self, ClipId, CommonItemProperties, DisplayItem as WrDisplayItem, DisplayListBuilder,
     DisplayListCapacity, PrimitiveFlags, PropertyBinding, PushStackingContextDisplayItem,
@@ -136,27 +136,32 @@ impl DisplayItem {
         match *self {
             DisplayItem::Rectangle(ref mut item) => {
                 item.item.common = build_common_item_properties(&item.base, state);
+                push_hit_test_common(builder, &item.base, &item.item.common, &item.item.bounds);
                 builder.push_item(&WrDisplayItem::Rectangle(item.item));
                 IsContentful(false)
             },
             DisplayItem::Text(ref mut item) => {
                 item.item.common = build_common_item_properties(&item.base, state);
+                push_hit_test_common(builder, &item.base, &item.item.common, &item.item.bounds);
                 builder.push_item(&WrDisplayItem::Text(item.item));
                 builder.push_iter(item.data.iter());
                 IsContentful(true)
             },
             DisplayItem::Image(ref mut item) => {
                 item.item.common = build_common_item_properties(&item.base, state);
+                push_hit_test_common(builder, &item.base, &item.item.common, &item.item.bounds);
                 builder.push_item(&WrDisplayItem::Image(item.item));
                 IsContentful(true)
             },
             DisplayItem::RepeatingImage(ref mut item) => {
                 item.item.common = build_common_item_properties(&item.base, state);
+                push_hit_test_common(builder, &item.base, &item.item.common, &item.item.bounds);
                 builder.push_item(&WrDisplayItem::RepeatingImage(item.item));
                 IsContentful(true)
             },
             DisplayItem::Border(ref mut item) => {
                 item.item.common = build_common_item_properties(&item.base, state);
+                push_hit_test_common(builder, &item.base, &item.item.common, &item.item.bounds);
                 if !item.data.is_empty() {
                     builder.push_stops(item.data.as_ref());
                 }
@@ -165,18 +170,21 @@ impl DisplayItem {
             },
             DisplayItem::Gradient(ref mut item) => {
                 item.item.common = build_common_item_properties(&item.base, state);
+                push_hit_test_common(builder, &item.base, &item.item.common, &item.item.bounds);
                 builder.push_stops(item.data.as_ref());
                 builder.push_item(&WrDisplayItem::Gradient(item.item));
                 IsContentful(false)
             },
             DisplayItem::RadialGradient(ref mut item) => {
                 item.item.common = build_common_item_properties(&item.base, state);
+                push_hit_test_common(builder, &item.base, &item.item.common, &item.item.bounds);
                 builder.push_stops(item.data.as_ref());
                 builder.push_item(&WrDisplayItem::RadialGradient(item.item));
                 IsContentful(false)
             },
             DisplayItem::Line(ref mut item) => {
                 item.item.common = build_common_item_properties(&item.base, state);
+                push_hit_test_common(builder, &item.base, &item.item.common, &item.item.area);
                 builder.push_item(&WrDisplayItem::Line(item.item));
                 IsContentful(false)
             },
@@ -373,15 +381,34 @@ fn build_common_item_properties(
     base: &BaseDisplayItem,
     state: &ClipScrollState,
 ) -> CommonItemProperties {
-    let tag = match base.metadata.pointing {
-        Some(cursor) => Some((base.metadata.node.0 as u64, cursor)),
-        None => None,
-    };
     CommonItemProperties {
         clip_rect: base.clip_rect,
         spatial_id: state.active_spatial_id,
         clip_id: state.active_clip_id,
         // TODO(gw): Make use of the WR backface visibility functionality.
         flags: PrimitiveFlags::default(),
+    }
+}
+
+/// Push a `HitTestDisplayItem` to the given `DisplayListBuilder`.
+fn push_hit_test_common(
+    builder: &mut DisplayListBuilder,
+    base: &BaseDisplayItem,
+    common: &CommonItemProperties,
+    bounds: &LayoutRect,
+) {
+    let tag = match base.metadata.pointing {
+        Some(cursor) => Some((base.metadata.node.0 as u64, cursor)),
+        None => None,
+    };
+
+    let bounds = common.clip_rect.intersection(bounds);
+
+    if let (Some(tag), Some(bounds)) = (tag, bounds) {
+        let common = CommonItemProperties {
+            clip_rect: bounds,
+            ..*common
+        };
+        builder.push_hit_test(&common, tag);
     }
 }
