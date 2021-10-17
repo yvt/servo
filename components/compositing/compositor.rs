@@ -643,9 +643,11 @@ impl<Window: WindowMethods + ?Sized> IOCompositor<Window> {
             },
 
             WebrenderMsg::Layout(script_traits::WebrenderMsg::HitTest(pipeline, point, sender)) => {
-                let result = self
-                    .webrender_api
-                    .hit_test(self.webrender_document, pipeline, point);
+                let result = self.webrender_api.hit_test(
+                    self.webrender_document,
+                    pipeline,
+                    point * self.scale.get(),
+                );
                 let _ = sender.send(result);
             },
 
@@ -907,12 +909,8 @@ impl<Window: WindowMethods + ?Sized> IOCompositor<Window> {
     }
 
     fn hit_test_at_point(&self, point: DevicePoint) -> HitTestResult {
-        let dppx = self.page_zoom * self.hidpi_factor();
-        let scaled_point = (point / dppx).to_untyped();
-
-        let world_cursor = webrender_api::units::WorldPoint::from_untyped(scaled_point);
         self.webrender_api
-            .hit_test(self.webrender_document, None, world_cursor)
+            .hit_test(self.webrender_document, None, point.cast_unit())
     }
 
     pub fn on_mouse_window_move_event_class(&mut self, cursor: DevicePoint) {
@@ -1138,8 +1136,7 @@ impl<Window: WindowMethods + ?Sized> IOCompositor<Window> {
                 // Leave ScrollLocation unchanged if it is Start or End location.
                 sl @ ScrollLocation::Start | sl @ ScrollLocation::End => sl,
             };
-            let cursor = (combined_event.cursor.to_f32() / self.scale).to_untyped();
-            let cursor = webrender_api::units::WorldPoint::from_untyped(cursor);
+            let cursor = combined_event.cursor.to_f32().cast_unit();
             let mut txn = render_api::Transaction::new();
 
             let hit = self
