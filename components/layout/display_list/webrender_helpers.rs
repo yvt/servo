@@ -9,12 +9,14 @@
 
 use crate::display_list::items::{BaseDisplayItem, ClipScrollNode, ClipScrollNodeType, ClipType};
 use crate::display_list::items::{DisplayItem, DisplayList, StackingContextType};
+use euclid::Scale;
 use msg::constellation_msg::PipelineId;
-use webrender_api::units::LayoutPoint;
+use style_traits::{CSSPixel, DevicePixel};
+use webrender_api::units::{LayoutPoint, LayoutTransform};
 use webrender_api::{
     self, ClipId, CommonItemProperties, DisplayItem as WrDisplayItem, DisplayListBuilder,
     DisplayListCapacity, PrimitiveFlags, PropertyBinding, PushStackingContextDisplayItem,
-    RasterSpace, ReferenceFrameKind, SpaceAndClipInfo, SpatialId, StackingContext,
+    RasterSpace, ReferenceFrameKind, SpaceAndClipInfo, SpatialId, StackingContext, TransformStyle,
 };
 
 struct ClipScrollState {
@@ -34,29 +36,14 @@ impl DisplayList {
     pub fn convert_to_webrender(
         &mut self,
         pipeline_id: PipelineId,
+        device_pixel_ratio: Scale<f32, CSSPixel, DevicePixel>,
     ) -> (DisplayListBuilder, IsContentful) {
         let mut clip_ids = vec![None; self.clip_scroll_nodes.len()];
         let mut spatial_ids = vec![None; self.clip_scroll_nodes.len()];
 
         // We need to add the WebRender root reference frame and root scroll node ids
         // here manually, because WebRender creates these automatically.
-        // We also follow the "old" WebRender API for clip/scroll for now,
-        // hence both arrays are initialized based on FIRST_SPATIAL_NODE_INDEX,
-        // while FIRST_CLIP_NODE_INDEX is not taken into account.
-
         let webrender_pipeline = pipeline_id.to_webrender();
-        clip_ids[0] = Some(ClipId::root(webrender_pipeline));
-        clip_ids[1] = Some(ClipId::root(webrender_pipeline));
-        spatial_ids[0] = Some(SpatialId::root_reference_frame(webrender_pipeline));
-        spatial_ids[1] = Some(SpatialId::root_scroll_node(webrender_pipeline));
-
-        let mut state = ClipScrollState {
-            clip_ids,
-            spatial_ids,
-            active_clip_id: ClipId::root(webrender_pipeline),
-            active_spatial_id: SpatialId::root_scroll_node(webrender_pipeline),
-        };
-
         let mut builder = DisplayListBuilder::new(webrender_pipeline);
         // TODO(bryce): Figure out how to add a starting capacity
         //      DisplayListCapacity {
@@ -64,6 +51,46 @@ impl DisplayList {
         //          cache_size: 0
         //      },
         //  );
+        let device_root_reference_frame = SpatialId::root_reference_frame(webrender_pipeline);
+        let device_root_scroll_frame = SpatialId::root_scroll_node(webrender_pipeline);
+
+        let css_to_device =
+            LayoutTransform::scale(device_pixel_ratio.get(), device_pixel_ratio.get(), 1.0);
+        let logical_root_reference_frame = builder.push_reference_frame(
+            LayoutPoint::zero(),
+            device_root_reference_frame,
+            TransformStyle::Flat,
+            PropertyBinding::Value(css_to_device),
+            ReferenceFrameKind::Transform {
+                is_2d_scale_translation: true,
+                should_snap: false,
+            },
+        );
+        let logical_root_scroll_frame = builder.push_reference_frame(
+            LayoutPoint::zero(),
+            device_root_scroll_frame,
+            TransformStyle::Flat,
+            PropertyBinding::Value(css_to_device),
+            ReferenceFrameKind::Transform {
+                is_2d_scale_translation: true,
+                should_snap: false,
+            },
+        );
+
+        // We follow the "old" WebRender API for clip/scroll for now,
+        // hence both arrays are initialized based on FIRST_SPATIAL_NODE_INDEX,
+        // while FIRST_CLIP_NODE_INDEX is not taken into account.
+        clip_ids[0] = Some(ClipId::root(webrender_pipeline));
+        clip_ids[1] = Some(ClipId::root(webrender_pipeline));
+        spatial_ids[0] = Some(logical_root_reference_frame);
+        spatial_ids[1] = Some(logical_root_scroll_frame);
+
+        let mut state = ClipScrollState {
+            clip_ids,
+            spatial_ids,
+            active_clip_id: ClipId::root(webrender_pipeline),
+            active_spatial_id: SpatialId::root_scroll_node(webrender_pipeline),
+        };
 
         let mut is_contentful = IsContentful(false);
         for item in &mut self.list {

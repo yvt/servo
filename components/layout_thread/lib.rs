@@ -1137,7 +1137,9 @@ impl LayoutThread {
                 debug!("Layout done!");
 
                 // TODO: Avoid the temporary conversion and build webrender sc/dl directly!
-                let (builder, is_contentful) = display_list.convert_to_webrender(self.id);
+                let device_pixel_ratio = self.stylist.device().device_pixel_ratio();
+                let (builder, is_contentful) =
+                    display_list.convert_to_webrender(self.id, device_pixel_ratio);
 
                 let viewport_size = Size2D::new(
                     self.viewport_size.width.to_f32_px(),
