@@ -266,7 +266,7 @@ impl DisplayItem {
                         state.spatial_ids[frame_index.to_index()] = Some(spatial_id);
                         state.clip_ids[frame_index.to_index()] = Some(cur_clip_id);
 
-                        bounds.translate(-bounds.min.to_vector());
+                        bounds = bounds.translate(-bounds.min.to_vector());
                         spatial_id
                     } else {
                         state.active_spatial_id
