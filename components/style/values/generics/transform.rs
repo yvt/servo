@@ -448,7 +448,7 @@ where
         let reference_height = reference_box.map(|v| v.size.height);
         let matrix = match *self {
             Rotate3D(ax, ay, az, theta) => {
-                let theta = TWO_PI - theta.radians64();
+                let theta = theta.radians64();
                 let (ax, ay, az, theta) =
                     get_normalized_vector_and_angle(ax.into(), ay.into(), az.into(), theta);
                 Transform3D::rotation(
@@ -459,15 +459,15 @@ where
                 )
             },
             RotateX(theta) => {
-                let theta = euclid::Angle::radians(TWO_PI - theta.radians64());
+                let theta = euclid::Angle::radians(theta.radians64());
                 Transform3D::rotation(1., 0., 0., theta)
             },
             RotateY(theta) => {
-                let theta = euclid::Angle::radians(TWO_PI - theta.radians64());
+                let theta = euclid::Angle::radians(theta.radians64());
                 Transform3D::rotation(0., 1., 0., theta)
             },
             RotateZ(theta) | Rotate(theta) => {
-                let theta = euclid::Angle::radians(TWO_PI - theta.radians64());
+                let theta = euclid::Angle::radians(theta.radians64());
                 Transform3D::rotation(0., 0., 1., theta)
             },
             Perspective(ref d) => {
