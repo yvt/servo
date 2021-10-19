@@ -956,6 +956,10 @@ impl Fragment {
             index,
         );
 
+        if placement.tile_size.width.0 == 0 || placement.tile_size.height.0 == 0 {
+            return;
+        }
+
         state.clipping_and_scrolling_scope(|state| {
             if !placement.clip_radii.is_zero() {
                 let clip_id =
