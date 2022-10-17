@@ -49,7 +49,7 @@ WEB_PLATFORM_TESTS_PATH = os.path.join("tests", "wpt", "web-platform-tests")
 SERVO_TESTS_PATH = os.path.join("tests", "wpt", "mozilla", "tests")
 
 CLANGFMT_CPP_DIRS = ["support/hololens/"]
-CLANGFMT_VERSION = "13"
+CLANGFMT_VERSION = "14"
 
 TEST_SUITES = OrderedDict([
     ("tidy", {"kwargs": {"all_files": False, "no_progress": False, "self_test": False,
@@ -535,7 +535,13 @@ class MachCommands(CommandBase):
                      help='The API endpoint for tracking known intermittent failures.')
     @CommandArgument('--reporter-api', default=None, action='store',
                      help='The API endpoint for reporting tracked intermittent failures.')
-    def filter_intermittents(self, summary, log_filteredsummary, log_intermittents, auth, tracker_api, reporter_api):
+    def filter_intermittents(self,
+                             summary,
+                             log_filteredsummary,
+                             log_intermittents,
+                             auth,
+                             tracker_api,
+                             reporter_api):
         encoded_auth = None
         if auth:
             with open(auth, "r") as file:

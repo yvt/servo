@@ -17,6 +17,9 @@ jobs:
     name: Build (Linux)
     runs-on: ubuntu-20.04
     steps:
+      - name: Branch check
+        if: ${{ !contains('refs/heads/auto refs/heads/try refs/heads/try-linux refs/heads/try-wpt', github.ref) }}
+        run: exit 0
       - uses: actions/checkout@v2
         with:
           fetch-depth: 2
@@ -50,6 +53,9 @@ jobs:
       matrix:
         chunk_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
     steps:
+      - name: Branch check
+        if: ${{ !contains('refs/heads/auto refs/heads/try refs/heads/try-wpt', github.ref) }}
+        run: exit 0
       - uses: actions/checkout@v2
         with:
           fetch-depth: 2
@@ -81,6 +87,7 @@ jobs:
             --tracker-api=default --reporter-api=default
       - name: Archive logs
         uses: actions/upload-artifact@v2
+        if: ${{ failure() }}
         with:
           name: wpt${{ matrix.chunk_id }}-logs-linux
           path: |

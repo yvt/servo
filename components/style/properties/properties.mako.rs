@@ -2534,11 +2534,9 @@ impl PropertyDeclaration {
     }
 }
 
-type SubpropertiesArray<T> =
-    [T; ${max(len(s.sub_properties) for s in data.shorthands_except_all()) \
-          if data.shorthands_except_all() else 0}];
-
-type SubpropertiesVec<T> = ArrayVec<SubpropertiesArray<T>>;
+type SubpropertiesVec<T> = ArrayVec<T, ${max(len(s.sub_properties) \
+    for s in data.shorthands_except_all()) \
+          if data.shorthands_except_all() else 0}>;
 
 /// A stack-allocated vector of `PropertyDeclaration`
 /// large enough to parse one CSS `key: value` declaration.
@@ -2594,7 +2592,11 @@ impl SourcePropertyDeclaration {
 
 /// Return type of SourcePropertyDeclaration::drain
 pub struct SourcePropertyDeclarationDrain<'a> {
-    declarations: ArrayVecDrain<'a, SubpropertiesArray<PropertyDeclaration>>,
+    declarations: ArrayVecDrain<
+        'a, PropertyDeclaration,
+        ${max(len(s.sub_properties) for s in data.shorthands_except_all()) \
+            if data.shorthands_except_all() else 0}
+    >,
     all_shorthand: AllShorthand,
 }
 
@@ -4131,6 +4133,9 @@ macro_rules! longhand_properties_idents {
 % for effect_name in ["repaint", "reflow_out_of_flow", "reflow", "rebuild_and_reflow_inline", "rebuild_and_reflow"]:
     macro_rules! restyle_damage_${effect_name} {
         ($old: ident, $new: ident, $damage: ident, [ $($effect:expr),* ]) => ({
+            restyle_damage_${effect_name}!($old, $new, $damage, [$($effect),*], false)
+        });
+        ($old: ident, $new: ident, $damage: ident, [ $($effect:expr),* ], $extra:expr) => ({
             if
                 % for style_struct in data.active_style_structs():
                     % for longhand in style_struct.longhands:
@@ -4141,13 +4146,13 @@ macro_rules! longhand_properties_idents {
                     % endfor
                 % endfor
 
-                false {
+                $extra || false {
                     $damage.insert($($effect)|*);
                     true
             } else {
                 false
             }
-        })
+        });
     }
 % endfor
 % endif
