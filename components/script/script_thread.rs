@@ -1762,7 +1762,7 @@ impl ScriptThread {
     // Perform step 11.10 from https://html.spec.whatwg.org/multipage/#event-loops.
     fn update_animations_and_send_events(&self) {
         for (_, document) in self.documents.borrow().iter() {
-            document.animations().send_pending_events();
+            document.animations().send_pending_events(document.window());
         }
 
         for (_, document) in self.documents.borrow().iter() {
