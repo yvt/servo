@@ -3796,6 +3796,7 @@ class CGPerSignatureCall(CGThing):
                                              self.getArgc(), self.descriptor,
                                              invalidEnumValueFatal=not setter) for
                          i in range(argConversionStartsAt, self.argCount)])
+        cgThings.append(CGGeneric(r'log::trace!("call: %s");' % nativeMethodName))
 
         errorResult = None
         if self.isFallible():

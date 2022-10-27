@@ -1753,6 +1753,7 @@ where
                 self.handle_script_new_auxiliary(load_info, layout_sender);
             },
             FromScriptMsg::ChangeRunningAnimationsState(animation_state) => {
+                debug!("ChangeRunningAnimationsState: {animation_state:?}");
                 self.handle_change_running_animations_state(source_pipeline_id, animation_state)
             },
             // Ask the embedder for permission to load a new page.

@@ -225,6 +225,7 @@ impl Animations {
 
         for transition in set.transitions.iter_mut() {
             if transition.state == AnimationState::Running && transition.has_ended(now) {
+                log::debug!("transition end: key = {key:?}");
                 transition.state = AnimationState::Finished;
                 self.add_transition_event(
                     key,
@@ -440,6 +441,8 @@ impl Animations {
                     continue;
                 },
             };
+
+            log::trace!("Processing event of type {:?}", event.event_type);
 
             let event_atom = match event.event_type {
                 TransitionOrAnimationEventType::AnimationEnd => atom!("animationend"),
